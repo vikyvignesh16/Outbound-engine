@@ -13,6 +13,15 @@ router = APIRouter()
 
 BATCH_LIMIT = 1000
 
+# Maps individual market codes → Clay webhook env var key.
+# DACH markets (DE, AT, CH) share one webhook.
+MARKET_TO_WEBHOOK_KEY: dict[str, str] = {
+    "UK": "CLAY_WEBHOOK_UK",
+    "DE": "CLAY_WEBHOOK_DACH",
+    "AT": "CLAY_WEBHOOK_DACH",
+    "CH": "CLAY_WEBHOOK_DACH",
+}
+
 
 async def run_monthly_batch() -> dict:
     """
@@ -85,26 +94,28 @@ async def push_batch_to_clay(batch_number: int) -> dict:
     if not rows:
         raise HTTPException(status_code=404, detail=f"No companies found for batch_number={batch_number}")
 
-    by_market: dict[str, list] = {}
+    # Group by webhook key so DACH markets (DE, AT, CH) merge into one POST
+    by_webhook: dict[str, list] = {}
     for row in rows:
-        by_market.setdefault(row["market"], []).append(row)
+        key = MARKET_TO_WEBHOOK_KEY.get(row["market"], f"CLAY_WEBHOOK_{row['market'].upper()}")
+        by_webhook.setdefault(key, []).append(row)
 
     results = {}
     async with httpx.AsyncClient(timeout=30.0) as client:
-        async def push_market(market: str, companies: list) -> None:
-            webhook_url = os.environ.get(f"CLAY_WEBHOOK_{market.upper()}")
+        async def push_group(webhook_key: str, companies: list) -> None:
+            webhook_url = os.environ.get(webhook_key)
             if not webhook_url:
-                logger.warning("monthly_batch: no CLAY_WEBHOOK_%s configured — skipping %d companies", market.upper(), len(companies))
-                results[market] = {"status": "skipped", "reason": "no_webhook_configured", "companies": len(companies)}
+                logger.warning("monthly_batch: %s not configured — skipping %d companies", webhook_key, len(companies))
+                results[webhook_key] = {"status": "skipped", "reason": "no_webhook_configured", "companies": len(companies)}
                 return
             resp = await client.post(webhook_url, json=companies)
             resp.raise_for_status()
-            logger.info("monthly_batch: pushed %d companies to Clay for market %s", len(companies), market)
-            results[market] = {"status": "ok", "companies": len(companies)}
+            logger.info("monthly_batch: pushed %d companies via %s", len(companies), webhook_key)
+            results[webhook_key] = {"status": "ok", "companies": len(companies)}
 
-        await asyncio.gather(*[push_market(m, c) for m, c in by_market.items()])
+        await asyncio.gather(*[push_group(k, c) for k, c in by_webhook.items()])
 
-    return {"status": "ok", "batch_number": batch_number, "markets": results}
+    return {"status": "ok", "batch_number": batch_number, "webhooks": results}
 
 
 @router.post("/pipelines/monthly-batch")

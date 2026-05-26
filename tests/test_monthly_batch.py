@@ -117,10 +117,10 @@ def test_monthly_batch_increments_batch_number():
 # ── POST /pipelines/monthly-batch/push ───────────────────────────────────────
 
 BATCH_1_ROWS = [
-    {"domain": "acme.com", "market": "UK", "company_name": "Acme",
-     "account_fit_score": 5, "vertical": "SaaS", "batch_month": "2026-05-01"},
-    {"domain": "beta.com", "market": "FR", "company_name": "Beta",
-     "account_fit_score": 4, "vertical": "Retail", "batch_month": "2026-05-01"},
+    {"domain": "acme.com",    "market": "UK", "company_name": "Acme",    "account_fit_score": 5, "vertical": "SaaS",   "batch_month": "2026-05-01"},
+    {"domain": "berlin.de",   "market": "DE", "company_name": "Berlin",  "account_fit_score": 4, "vertical": "Retail", "batch_month": "2026-05-01"},
+    {"domain": "vienna.at",   "market": "AT", "company_name": "Vienna",  "account_fit_score": 4, "vertical": "Retail", "batch_month": "2026-05-01"},
+    {"domain": "zurich.ch",   "market": "CH", "company_name": "Zurich",  "account_fit_score": 3, "vertical": "Fintech","batch_month": "2026-05-01"},
 ]
 
 
@@ -131,13 +131,13 @@ def _make_push_mock(rows=None):
     return mock_sb
 
 
-def test_push_sends_to_correct_webhooks():
+def test_push_groups_dach_into_single_webhook():
     mock_sb = _make_push_mock()
     mock_response = MagicMock(status_code=200)
     mock_response.raise_for_status = MagicMock()
 
     with patch("pipelines.monthly_batch.get_supabase", return_value=mock_sb), \
-         patch.dict(os.environ, {"CLAY_WEBHOOK_UK": "https://clay.run/uk", "CLAY_WEBHOOK_FR": "https://clay.run/fr"}), \
+         patch.dict(os.environ, {"CLAY_WEBHOOK_UK": "https://clay.run/uk", "CLAY_WEBHOOK_DACH": "https://clay.run/dach"}), \
          patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_response)):
         from api.main import app
         resp = TestClient(app).post("/pipelines/monthly-batch/push?batch_number=1")
@@ -145,29 +145,27 @@ def test_push_sends_to_correct_webhooks():
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["markets"]["UK"]["status"] == "ok"
-    assert body["markets"]["UK"]["companies"] == 1
-    assert body["markets"]["FR"]["status"] == "ok"
-    assert body["markets"]["FR"]["companies"] == 1
+    assert body["webhooks"]["CLAY_WEBHOOK_UK"]["status"] == "ok"
+    assert body["webhooks"]["CLAY_WEBHOOK_UK"]["companies"] == 1
+    assert body["webhooks"]["CLAY_WEBHOOK_DACH"]["status"] == "ok"
+    assert body["webhooks"]["CLAY_WEBHOOK_DACH"]["companies"] == 3  # DE + AT + CH
 
 
-def test_push_skips_market_with_no_webhook():
+def test_push_skips_webhook_not_configured():
     mock_sb = _make_push_mock()
     mock_response = MagicMock(status_code=200)
     mock_response.raise_for_status = MagicMock()
 
+    os.environ.pop("CLAY_WEBHOOK_DACH", None)
     with patch("pipelines.monthly_batch.get_supabase", return_value=mock_sb), \
-         patch.dict(os.environ, {"CLAY_WEBHOOK_UK": "https://clay.run/uk"}, clear=False), \
+         patch.dict(os.environ, {"CLAY_WEBHOOK_UK": "https://clay.run/uk"}), \
          patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_response)):
-        # Remove FR webhook if set
-        os.environ.pop("CLAY_WEBHOOK_FR", None)
         from api.main import app
         resp = TestClient(app).post("/pipelines/monthly-batch/push?batch_number=1")
 
-    assert resp.status_code == 200
     body = resp.json()
-    assert body["markets"]["UK"]["status"] == "ok"
-    assert body["markets"]["FR"]["status"] == "skipped"
+    assert body["webhooks"]["CLAY_WEBHOOK_UK"]["status"] == "ok"
+    assert body["webhooks"]["CLAY_WEBHOOK_DACH"]["status"] == "skipped"
 
 
 def test_push_returns_404_for_unknown_batch():
