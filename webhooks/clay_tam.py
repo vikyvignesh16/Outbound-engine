@@ -53,7 +53,7 @@ async def receive_clay_tam(
         raise HTTPException(status_code=422, detail=exc.errors())
     rows = [_transform_row(r) for r in payload.root]
 
-    get_supabase().table("sourced_tam").upsert(rows, on_conflict="domain,market").execute()
+    get_supabase().table("sourced_tam_v2").upsert(rows, on_conflict="domain,market").execute()
 
     logger.info("clay_tam: upserted %d rows", len(rows))
     return {"status": "ok", "inserted": len(rows)}

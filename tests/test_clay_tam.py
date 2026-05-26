@@ -61,7 +61,7 @@ def test_valid_payload_returns_ok(client):
 
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok", "inserted": 1}
-    mock_sb.table.assert_called_once_with("sourced_tam")
+    mock_sb.table.assert_called_once_with("sourced_tam_v2")
 
 
 def test_invalid_signature_returns_401(client):

@@ -80,7 +80,7 @@ def run():
     print("\nVerifying Supabase row ...")
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
     result = (
-        sb.table("sourced_tam")
+        sb.table("sourced_tam_v2")
         .select("domain, market, company_name, vertical, country, employee_range, raw")
         .eq("domain", "whitbreadcareers.com")
         .eq("market", "UK")
