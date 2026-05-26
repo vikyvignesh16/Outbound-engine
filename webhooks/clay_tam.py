@@ -3,7 +3,7 @@ import hashlib
 import os
 import logging
 
-from fastapi import APIRouter, Request, Header, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Request, Header, HTTPException
 from pydantic import ValidationError
 from db.client import get_supabase
 from db.models import ClayTAMRow, ClayTAMPayload
@@ -51,7 +51,6 @@ def _upsert_in_chunks(rows: list[dict], chunk_size: int = 100) -> None:
 @router.post("/webhooks/clay/tam")
 async def receive_clay_tam(
     request: Request,
-    background_tasks: BackgroundTasks,
     x_clay_signature: str | None = Header(None),
 ):
     raw_body = await request.body()
@@ -63,6 +62,6 @@ async def receive_clay_tam(
         raise HTTPException(status_code=422, detail=exc.errors())
 
     rows = [_transform_row(r) for r in payload.root]
-    background_tasks.add_task(_upsert_in_chunks, rows)
+    _upsert_in_chunks(rows)
 
     return {"status": "ok", "accepted": len(rows)}
