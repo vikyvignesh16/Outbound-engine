@@ -1,6 +1,6 @@
 import os
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_KEY", "test-key")
@@ -112,3 +112,67 @@ def test_monthly_batch_increments_batch_number():
     assert resp.json()["batch_number"] == 4
     inserted = campaign_tbl.insert.call_args[0][0]
     assert all(r["batch_number"] == 4 for r in inserted)
+
+
+# ── POST /pipelines/monthly-batch/push ───────────────────────────────────────
+
+BATCH_1_ROWS = [
+    {"domain": "acme.com", "market": "UK", "company_name": "Acme",
+     "account_fit_score": 5, "vertical": "SaaS", "batch_month": "2026-05-01"},
+    {"domain": "beta.com", "market": "FR", "company_name": "Beta",
+     "account_fit_score": 4, "vertical": "Retail", "batch_month": "2026-05-01"},
+]
+
+
+def _make_push_mock(rows=None):
+    rows = rows if rows is not None else BATCH_1_ROWS
+    mock_sb = MagicMock()
+    mock_sb.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=rows)
+    return mock_sb
+
+
+def test_push_sends_to_correct_webhooks():
+    mock_sb = _make_push_mock()
+    mock_response = MagicMock(status_code=200)
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("pipelines.monthly_batch.get_supabase", return_value=mock_sb), \
+         patch.dict(os.environ, {"CLAY_WEBHOOK_UK": "https://clay.run/uk", "CLAY_WEBHOOK_FR": "https://clay.run/fr"}), \
+         patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_response)):
+        from api.main import app
+        resp = TestClient(app).post("/pipelines/monthly-batch/push?batch_number=1")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["markets"]["UK"]["status"] == "ok"
+    assert body["markets"]["UK"]["companies"] == 1
+    assert body["markets"]["FR"]["status"] == "ok"
+    assert body["markets"]["FR"]["companies"] == 1
+
+
+def test_push_skips_market_with_no_webhook():
+    mock_sb = _make_push_mock()
+    mock_response = MagicMock(status_code=200)
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("pipelines.monthly_batch.get_supabase", return_value=mock_sb), \
+         patch.dict(os.environ, {"CLAY_WEBHOOK_UK": "https://clay.run/uk"}, clear=False), \
+         patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_response)):
+        # Remove FR webhook if set
+        os.environ.pop("CLAY_WEBHOOK_FR", None)
+        from api.main import app
+        resp = TestClient(app).post("/pipelines/monthly-batch/push?batch_number=1")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["markets"]["UK"]["status"] == "ok"
+    assert body["markets"]["FR"]["status"] == "skipped"
+
+
+def test_push_returns_404_for_unknown_batch():
+    mock_sb = _make_push_mock(rows=[])
+    with patch("pipelines.monthly_batch.get_supabase", return_value=mock_sb):
+        from api.main import app
+        resp = TestClient(app).post("/pipelines/monthly-batch/push?batch_number=99")
+    assert resp.status_code == 404

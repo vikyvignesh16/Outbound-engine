@@ -1,7 +1,10 @@
+import asyncio
 import logging
+import os
 from datetime import date
 
-from fastapi import APIRouter
+import httpx
+from fastapi import APIRouter, HTTPException
 
 from db.client import get_supabase
 
@@ -63,7 +66,54 @@ async def run_monthly_batch() -> dict:
     }
 
 
+async def push_batch_to_clay(batch_number: int) -> dict:
+    """
+    Reads campaign_batches for the given batch_number, groups by market,
+    and POSTs each group to the corresponding CLAY_WEBHOOK_{MARKET} env var URL.
+    Markets with no webhook configured are skipped with a warning.
+    """
+    sb = get_supabase()
+
+    rows = (
+        sb.table("campaign_batches")
+        .select("domain, market, company_name, account_fit_score, vertical, batch_month")
+        .eq("batch_number", batch_number)
+        .execute()
+        .data
+    )
+
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No companies found for batch_number={batch_number}")
+
+    by_market: dict[str, list] = {}
+    for row in rows:
+        by_market.setdefault(row["market"], []).append(row)
+
+    results = {}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        async def push_market(market: str, companies: list) -> None:
+            webhook_url = os.environ.get(f"CLAY_WEBHOOK_{market.upper()}")
+            if not webhook_url:
+                logger.warning("monthly_batch: no CLAY_WEBHOOK_%s configured — skipping %d companies", market.upper(), len(companies))
+                results[market] = {"status": "skipped", "reason": "no_webhook_configured", "companies": len(companies)}
+                return
+            resp = await client.post(webhook_url, json=companies)
+            resp.raise_for_status()
+            logger.info("monthly_batch: pushed %d companies to Clay for market %s", len(companies), market)
+            results[market] = {"status": "ok", "companies": len(companies)}
+
+        await asyncio.gather(*[push_market(m, c) for m, c in by_market.items()])
+
+    return {"status": "ok", "batch_number": batch_number, "markets": results}
+
+
 @router.post("/pipelines/monthly-batch")
 async def monthly_batch():
     """Selects next 1000 uncontacted priority companies and logs them to campaign_batches."""
     return await run_monthly_batch()
+
+
+@router.post("/pipelines/monthly-batch/push")
+async def monthly_batch_push(batch_number: int):
+    """Pushes a campaign batch to Clay webhooks, grouped by market."""
+    return await push_batch_to_clay(batch_number)
