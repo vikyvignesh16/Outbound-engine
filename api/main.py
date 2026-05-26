@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 from webhooks import clay_tam
+from pipelines import qualification
 
 app = FastAPI(title="Brevo Outbound Engine")
 
 app.include_router(clay_tam.router)
+app.include_router(qualification.router)
 
 @app.get("/health")
 def health():
