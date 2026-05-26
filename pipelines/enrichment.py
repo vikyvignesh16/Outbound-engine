@@ -71,8 +71,8 @@ observe from their website, job postings, or public sources. If you
 cannot verify something, say "unknown" for text fields and false for
 boolean fields.
 
-Return your answer in this exact JSON format with no preamble or text
-outside it:
+Return your answer in this exact JSON format with no preamble, no markdown
+code fences, and no text outside it:
 
 {{
   "response": {{
@@ -184,7 +184,12 @@ async def process_results(batch_id: str) -> dict:
             )
             continue
         try:
-            text = result.result.message.content[0].text
+            text = result.result.message.content[0].text.strip()
+            if text.startswith("```"):
+                text = text.split("```", 2)[1]
+                if text.startswith("json"):
+                    text = text[4:]
+                text = text.strip()
             data = json.loads(text)["response"]
         except (json.JSONDecodeError, KeyError, IndexError) as exc:
             logger.error("enrichment: parse error for %s: %s", result.custom_id, exc)
