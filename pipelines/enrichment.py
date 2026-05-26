@@ -176,7 +176,7 @@ async def process_results(batch_id: str) -> dict:
     total_input = 0
     total_output = 0
 
-    async for result in client.messages.batches.results(batch_id):
+    async for result in await client.messages.batches.results(batch_id):
         if result.result.type != "succeeded":
             logger.warning(
                 "enrichment: skipping %s result for %s",

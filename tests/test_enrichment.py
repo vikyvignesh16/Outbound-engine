@@ -178,7 +178,7 @@ def test_complete_endpoint_writes_results():
 
     mock_client = MagicMock()
     mock_client.messages.batches.retrieve = AsyncMock(return_value=mock_batch)
-    mock_client.messages.batches.results = MagicMock(return_value=_async_iter([mock_result]))
+    mock_client.messages.batches.results = AsyncMock(return_value=_async_iter([mock_result]))
 
     mock_sb = MagicMock()
     mock_sb.table.return_value.upsert.return_value.execute.return_value = MagicMock()
@@ -223,7 +223,7 @@ def test_complete_endpoint_skips_failed_results():
 
     mock_client = MagicMock()
     mock_client.messages.batches.retrieve = AsyncMock(return_value=mock_batch)
-    mock_client.messages.batches.results = MagicMock(
+    mock_client.messages.batches.results = AsyncMock(
         return_value=_async_iter([failed_result, good_result])
     )
 
