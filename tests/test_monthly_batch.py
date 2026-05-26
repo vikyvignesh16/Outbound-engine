@@ -136,9 +136,10 @@ def test_push_groups_dach_into_single_webhook():
     mock_response = MagicMock(status_code=200)
     mock_response.raise_for_status = MagicMock()
 
+    mock_post = AsyncMock(return_value=mock_response)
     with patch("pipelines.monthly_batch.get_supabase", return_value=mock_sb), \
          patch.dict(os.environ, {"CLAY_WEBHOOK_UK": "https://clay.run/uk", "CLAY_WEBHOOK_DACH": "https://clay.run/dach"}), \
-         patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_response)):
+         patch("httpx.AsyncClient.post", mock_post):
         from api.main import app
         resp = TestClient(app).post("/pipelines/monthly-batch/push?batch_number=1")
 
@@ -149,6 +150,8 @@ def test_push_groups_dach_into_single_webhook():
     assert body["webhooks"]["CLAY_WEBHOOK_UK"]["companies"] == 1
     assert body["webhooks"]["CLAY_WEBHOOK_DACH"]["status"] == "ok"
     assert body["webhooks"]["CLAY_WEBHOOK_DACH"]["companies"] == 3  # DE + AT + CH
+    # Each company is a separate POST — 4 total (1 UK + 3 DACH)
+    assert mock_post.call_count == 4
 
 
 def test_push_skips_webhook_not_configured():
