@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, Request, Header, HTTPException
 from pydantic import ValidationError
-from db.client import supabase
+from db.client import get_supabase
 from db.models import ClayTAMRow, ClayTAMPayload
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ async def receive_clay_tam(
         raise HTTPException(status_code=422, detail=exc.errors())
     rows = [_transform_row(r) for r in payload.root]
 
-    supabase.table("sourced_tam").upsert(rows, on_conflict="domain,market").execute()
+    get_supabase().table("sourced_tam").upsert(rows, on_conflict="domain,market").execute()
 
     logger.info("clay_tam: upserted %d rows", len(rows))
     return {"status": "ok", "inserted": len(rows)}

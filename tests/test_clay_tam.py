@@ -43,7 +43,7 @@ def client():
     mock_supabase = MagicMock()
     mock_supabase.table.return_value = mock_table
 
-    with patch("webhooks.clay_tam.supabase", mock_supabase):
+    with patch("webhooks.clay_tam.get_supabase", return_value=mock_supabase):
         from api.main import app
         yield TestClient(app), mock_supabase
 
