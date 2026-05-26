@@ -3,7 +3,7 @@ import hashlib
 import os
 import logging
 
-from fastapi import APIRouter, Request, Header, HTTPException
+from fastapi import APIRouter, Request, Header, HTTPException, BackgroundTasks
 from pydantic import ValidationError
 from db.client import get_supabase
 from db.models import ClayTAMRow, ClayTAMPayload
@@ -39,9 +39,19 @@ def _transform_row(row: ClayTAMRow) -> dict:
     }
 
 
+def _upsert_in_chunks(rows: list[dict], chunk_size: int = 100) -> None:
+    sb = get_supabase()
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i : i + chunk_size]
+        sb.table("sourced_tam_v2").upsert(chunk, on_conflict="domain,market").execute()
+        logger.info("clay_tam: upserted rows %d-%d", i, i + len(chunk))
+    logger.info("clay_tam: total accepted %d", len(rows))
+
+
 @router.post("/webhooks/clay/tam")
 async def receive_clay_tam(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_clay_signature: str | None = Header(None),
 ):
     raw_body = await request.body()
@@ -51,9 +61,8 @@ async def receive_clay_tam(
         payload = ClayTAMPayload.model_validate_json(raw_body)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors())
+
     rows = [_transform_row(r) for r in payload.root]
+    background_tasks.add_task(_upsert_in_chunks, rows)
 
-    get_supabase().table("sourced_tam_v2").upsert(rows, on_conflict="domain,market").execute()
-
-    logger.info("clay_tam: upserted %d rows", len(rows))
-    return {"status": "ok", "inserted": len(rows)}
+    return {"status": "ok", "accepted": len(rows)}

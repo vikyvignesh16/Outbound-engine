@@ -70,8 +70,9 @@ def run():
         timeout=15,
     )
 
-    if resp.status_code == 200 and resp.json().get("status") == "ok":
-        print(f"  PASS webhook → {resp.json()}")
+    data = resp.json() if resp.status_code == 200 else {}
+    if resp.status_code == 200 and data.get("status") == "ok" and "accepted" in data:
+        print(f"  PASS webhook → {data}")
     else:
         failures.append(f"webhook returned {resp.status_code}: {resp.text}")
         print(f"  FAIL webhook → {resp.status_code}: {resp.text}")

@@ -60,7 +60,7 @@ def test_valid_payload_returns_ok(client):
     )
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "inserted": 1}
+    assert resp.json() == {"status": "ok", "accepted": 1}
     mock_sb.table.assert_called_once_with("sourced_tam_v2")
 
 
@@ -150,7 +150,7 @@ def test_batch_of_multiple_rows(client):
         headers={"x-clay-signature": sig, "content-type": "application/json"},
     )
 
-    assert resp.json()["inserted"] == 2
+    assert resp.json()["accepted"] == 2
     upserted_rows = mock_sb.table().upsert.call_args[0][0]
     markets = {r["market"] for r in upserted_rows}
     assert markets == {"UK", "FR"}
