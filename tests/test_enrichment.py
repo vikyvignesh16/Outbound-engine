@@ -33,12 +33,15 @@ async def _async_iter(items):
         yield item
 
 
-def _make_result(custom_id: str, response_dict: dict, result_type: str = "succeeded"):
+def _make_result(custom_id: str, response_dict: dict, result_type: str = "succeeded",
+                 input_tokens: int = 500, output_tokens: int = 200):
     result = MagicMock()
     result.custom_id = custom_id
     result.result.type = result_type
     if result_type == "succeeded":
         result.result.message.content = [MagicMock(text=json.dumps(response_dict))]
+        result.result.message.usage.input_tokens = input_tokens
+        result.result.message.usage.output_tokens = output_tokens
     return result
 
 
@@ -119,6 +122,35 @@ def test_submit_endpoint_returns_batch_id():
     assert resp.json()["submitted"] == 1
 
 
+def test_submit_endpoint_writes_tracking_row():
+    mock_sb = MagicMock()
+    mock_sb.table.return_value.select.return_value.is_.return_value.execute.return_value = MagicMock(
+        data=[{"domain": "acme.com", "market": "UK", "company_name": "Acme"}]
+    )
+
+    mock_batch = MagicMock()
+    mock_batch.id = "batch_abc123"
+
+    mock_client = MagicMock()
+    mock_client.messages.batches.create = AsyncMock(return_value=mock_batch)
+
+    with patch("pipelines.enrichment.get_supabase", return_value=mock_sb), \
+         patch("pipelines.enrichment._get_client", return_value=mock_client):
+        from api.main import app
+        tc = TestClient(app)
+        tc.post("/pipelines/enrich")
+
+    insert_calls = [
+        call for call in mock_sb.table.return_value.insert.call_args_list
+    ]
+    assert len(insert_calls) == 1
+    payload = insert_calls[0][0][0]
+    assert payload["batch_id"] == "batch_abc123"
+    assert payload["model"] == "claude-sonnet-4-6"
+    assert payload["status"] == "pending"
+    assert payload["companies_submitted"] == 1
+
+
 # ── POST /pipelines/enrich/complete ──────────────────────────────────────────
 
 def test_complete_endpoint_pending():
@@ -158,7 +190,13 @@ def test_complete_endpoint_writes_results():
         resp = tc.post("/pipelines/enrich/complete?batch_id=batch_xyz")
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "enriched": 1}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["enriched"] == 1
+    assert body["input_tokens"] == 500
+    assert body["output_tokens"] == 200
+    # $1.50/1M input + $7.50/1M output = 0.00075 + 0.0015 = 0.002250
+    assert body["estimated_cost_usd"] == pytest.approx(0.002250, abs=1e-6)
 
     upserted = mock_sb.table.return_value.upsert.call_args[0][0]
     assert upserted[0]["domain"] == "acme.com"
@@ -167,6 +205,13 @@ def test_complete_endpoint_writes_results():
     assert upserted[0]["vertical"] == "Hospitality"
     assert upserted[0]["has_loyalty_program"] is True
     assert upserted[0]["needs_cdp"] is True
+
+    update_payload = mock_sb.table.return_value.update.call_args[0][0]
+    assert update_payload["status"] == "completed"
+    assert update_payload["companies_enriched"] == 1
+    assert update_payload["input_tokens"] == 500
+    assert update_payload["output_tokens"] == 200
+    assert update_payload["estimated_cost_usd"] == pytest.approx(0.002250, abs=1e-6)
 
 
 def test_complete_endpoint_skips_failed_results():
@@ -191,6 +236,8 @@ def test_complete_endpoint_skips_failed_results():
         tc = TestClient(app)
         resp = tc.post("/pipelines/enrich/complete?batch_id=batch_xyz")
 
-    assert resp.json() == {"status": "ok", "enriched": 1}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["enriched"] == 1
     upserted = mock_sb.table.return_value.upsert.call_args[0][0]
     assert upserted[0]["domain"] == "acme.com"

@@ -1,11 +1,15 @@
 import json
 import logging
 import os
+from datetime import datetime, timezone
 
 import anthropic
 from fastapi import APIRouter
 
 from db.client import get_supabase
+
+_BATCH_INPUT_COST_PER_TOKEN  = 1.50 / 1_000_000
+_BATCH_OUTPUT_COST_PER_TOKEN = 7.50 / 1_000_000
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -138,6 +142,14 @@ async def submit_enrichment() -> dict:
     client = _get_client()
     requests = build_batch_requests(rows)
     batch = await client.messages.batches.create(requests=requests)
+
+    sb.table("enrichment_batches").insert({
+        "batch_id":            batch.id,
+        "model":               "claude-sonnet-4-6",
+        "status":              "pending",
+        "companies_submitted": len(rows),
+    }).execute()
+
     logger.info("enrichment: submitted batch %s for %d companies", batch.id, len(rows))
     return {"status": "ok", "batch_id": batch.id, "submitted": len(rows)}
 
@@ -158,6 +170,8 @@ async def process_results(batch_id: str) -> dict:
 
     sb = get_supabase()
     updates = []
+    total_input = 0
+    total_output = 0
 
     async for result in client.messages.batches.results(batch_id):
         if result.result.type != "succeeded":
@@ -172,6 +186,10 @@ async def process_results(batch_id: str) -> dict:
         except (json.JSONDecodeError, KeyError, IndexError) as exc:
             logger.error("enrichment: parse error for %s: %s", result.custom_id, exc)
             continue
+
+        usage = result.result.message.usage
+        total_input  += usage.input_tokens
+        total_output += usage.output_tokens
 
         domain, market = _decode_custom_id(result.custom_id)
         updates.append({
@@ -189,8 +207,26 @@ async def process_results(batch_id: str) -> dict:
         chunk = updates[i : i + 100]
         sb.table("qualified_tam_v2").upsert(chunk, on_conflict="domain,market").execute()
 
-    logger.info("enrichment: wrote %d results from batch %s", len(updates), batch_id)
-    return {"status": "ok", "enriched": len(updates)}
+    cost = (total_input * _BATCH_INPUT_COST_PER_TOKEN
+          + total_output * _BATCH_OUTPUT_COST_PER_TOKEN)
+
+    sb.table("enrichment_batches").update({
+        "status":             "completed",
+        "companies_enriched": len(updates),
+        "input_tokens":       total_input,
+        "output_tokens":      total_output,
+        "estimated_cost_usd": round(cost, 6),
+        "completed_at":       datetime.now(timezone.utc).isoformat(),
+    }).eq("batch_id", batch_id).execute()
+
+    logger.info("enrichment: wrote %d results from batch %s (cost: $%.6f)", len(updates), batch_id, cost)
+    return {
+        "status":              "ok",
+        "enriched":            len(updates),
+        "input_tokens":        total_input,
+        "output_tokens":       total_output,
+        "estimated_cost_usd":  round(cost, 6),
+    }
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
