@@ -96,7 +96,7 @@ def test_submit_endpoint_no_rows():
         resp = tc.post("/pipelines/enrich")
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "submitted": 0}
+    assert resp.json() == {"status": "ok", "submitted": 0, "batches": 0, "batch_ids": []}
 
 
 def test_submit_endpoint_returns_batch_id():
@@ -118,8 +118,10 @@ def test_submit_endpoint_returns_batch_id():
         resp = tc.post("/pipelines/enrich")
 
     assert resp.status_code == 200
-    assert resp.json()["batch_id"] == "batch_abc123"
-    assert resp.json()["submitted"] == 1
+    body = resp.json()
+    assert body["batch_ids"] == ["batch_abc123"]
+    assert body["submitted"] == 1
+    assert body["batches"] == 1
 
 
 def test_submit_endpoint_writes_tracking_row():
@@ -149,6 +151,31 @@ def test_submit_endpoint_writes_tracking_row():
     assert payload["model"] == "claude-sonnet-4-6"
     assert payload["status"] == "pending"
     assert payload["companies_submitted"] == 1
+
+
+def test_submit_endpoint_chunks_into_500():
+    mock_sb = MagicMock()
+    rows = [{"domain": f"co{i}.com", "market": "UK", "company_name": f"Co{i}"} for i in range(600)]
+    mock_sb.table.return_value.select.return_value.is_.return_value.execute.return_value = MagicMock(data=rows)
+
+    mock_batch = MagicMock()
+    mock_batch.id = "batch_xyz"
+
+    mock_client = MagicMock()
+    mock_client.messages.batches.create = AsyncMock(return_value=mock_batch)
+
+    with patch("pipelines.enrichment.get_supabase", return_value=mock_sb), \
+         patch("pipelines.enrichment._get_client", return_value=mock_client):
+        from api.main import app
+        tc = TestClient(app)
+        resp = tc.post("/pipelines/enrich")
+
+    body = resp.json()
+    assert body["submitted"] == 600
+    assert body["batches"] == 2
+    assert mock_client.messages.batches.create.call_count == 2
+    first_call_requests = mock_client.messages.batches.create.call_args_list[0][1]["requests"]
+    assert len(first_call_requests) == 500
 
 
 # ── POST /pipelines/enrich/complete ──────────────────────────────────────────

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -121,12 +122,16 @@ def build_batch_requests(companies: list[dict]) -> list[dict]:
     ]
 
 
+_BATCH_SIZE = 500
+
+
 # ── Step 5a: submit batch ─────────────────────────────────────────────────────
 
 async def submit_enrichment() -> dict:
     """
-    Reads qualified_tam_v2 rows with no account_fit_score, submits them to the
-    Claude Batch API, and returns the batch_id for later retrieval.
+    Reads qualified_tam_v2 rows with no account_fit_score, chunks them into
+    batches of 500, submits all chunks in parallel to the Claude Batch API,
+    and returns all batch IDs.
     """
     sb = get_supabase()
 
@@ -140,21 +145,25 @@ async def submit_enrichment() -> dict:
 
     if not rows:
         logger.info("enrichment: no rows to enrich")
-        return {"status": "ok", "submitted": 0}
+        return {"status": "ok", "submitted": 0, "batches": 0, "batch_ids": []}
 
     client = _get_client()
-    requests = build_batch_requests(rows)
-    batch = await client.messages.batches.create(requests=requests)
+    chunks = [rows[i: i + _BATCH_SIZE] for i in range(0, len(rows), _BATCH_SIZE)]
 
-    sb.table("enrichment_batches").insert({
-        "batch_id":            batch.id,
-        "model":               "claude-sonnet-4-6",
-        "status":              "pending",
-        "companies_submitted": len(rows),
-    }).execute()
+    async def submit_chunk(chunk: list[dict]) -> str:
+        batch = await client.messages.batches.create(requests=build_batch_requests(chunk))
+        sb.table("enrichment_batches").insert({
+            "batch_id":            batch.id,
+            "model":               "claude-sonnet-4-6",
+            "status":              "pending",
+            "companies_submitted": len(chunk),
+        }).execute()
+        logger.info("enrichment: submitted batch %s for %d companies", batch.id, len(chunk))
+        return batch.id
 
-    logger.info("enrichment: submitted batch %s for %d companies", batch.id, len(rows))
-    return {"status": "ok", "batch_id": batch.id, "submitted": len(rows)}
+    batch_ids = await asyncio.gather(*[submit_chunk(c) for c in chunks])
+    logger.info("enrichment: %d batches submitted, %d companies total", len(batch_ids), len(rows))
+    return {"status": "ok", "submitted": len(rows), "batches": len(batch_ids), "batch_ids": list(batch_ids)}
 
 
 # ── Step 5b: process results ──────────────────────────────────────────────────
