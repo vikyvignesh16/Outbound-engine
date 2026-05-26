@@ -86,10 +86,19 @@ outside it:
 
 # ── Batch helpers ─────────────────────────────────────────────────────────────
 
+def _encode_custom_id(domain: str, market: str) -> str:
+    return f"{domain.replace('.', '_')}_{market}"
+
+
+def _decode_custom_id(custom_id: str) -> tuple[str, str]:
+    encoded_domain, market = custom_id.rsplit("_", 1)
+    return encoded_domain.replace("_", "."), market
+
+
 def build_batch_requests(companies: list[dict]) -> list[dict]:
     return [
         {
-            "custom_id": f"{row['domain']}||{row['market']}",
+            "custom_id": _encode_custom_id(row["domain"], row["market"]),
             "params": {
                 "model": "claude-sonnet-4-6",
                 "max_tokens": 1000,
@@ -164,7 +173,7 @@ async def process_results(batch_id: str) -> dict:
             logger.error("enrichment: parse error for %s: %s", result.custom_id, exc)
             continue
 
-        domain, market = result.custom_id.split("||", 1)
+        domain, market = _decode_custom_id(result.custom_id)
         updates.append({
             "domain":              domain,
             "market":              market,

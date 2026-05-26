@@ -63,16 +63,20 @@ def test_build_batch_requests_format():
     companies = [{"domain": "acme.com", "market": "UK", "company_name": "Acme"}]
     reqs = build_batch_requests(companies)
     assert len(reqs) == 1
-    assert reqs[0]["custom_id"] == "acme.com||UK"
+    assert reqs[0]["custom_id"] == "acme_com_UK"
     assert reqs[0]["params"]["model"] == "claude-sonnet-4-6"
     assert reqs[0]["params"]["messages"][0]["role"] == "user"
 
 
 def test_build_batch_requests_custom_id_separator():
-    # || separator must survive round-trip split
+    # custom_id must only use [a-zA-Z0-9_-] (Claude Batch API requirement)
+    from pipelines.enrichment import _encode_custom_id, _decode_custom_id
     companies = [{"domain": "some.company.co.uk", "market": "UK", "company_name": "Co"}]
     reqs = build_batch_requests(companies)
-    domain, market = reqs[0]["custom_id"].split("||", 1)
+    custom_id = reqs[0]["custom_id"]
+    import re
+    assert re.match(r'^[a-zA-Z0-9_-]+$', custom_id), f"Invalid custom_id: {custom_id}"
+    domain, market = _decode_custom_id(custom_id)
     assert domain == "some.company.co.uk"
     assert market == "UK"
 
@@ -138,7 +142,7 @@ def test_complete_endpoint_writes_results():
     mock_batch = MagicMock()
     mock_batch.processing_status = "ended"
 
-    mock_result = _make_result("acme.com||UK", SAMPLE_RESPONSE)
+    mock_result = _make_result("acme_com_UK", SAMPLE_RESPONSE)
 
     mock_client = MagicMock()
     mock_client.messages.batches.retrieve = AsyncMock(return_value=mock_batch)
@@ -169,8 +173,8 @@ def test_complete_endpoint_skips_failed_results():
     mock_batch = MagicMock()
     mock_batch.processing_status = "ended"
 
-    failed_result = _make_result("bad.com||UK", {}, result_type="errored")
-    good_result = _make_result("acme.com||UK", SAMPLE_RESPONSE)
+    failed_result = _make_result("bad_com_UK", {}, result_type="errored")
+    good_result = _make_result("acme_com_UK", SAMPLE_RESPONSE)
 
     mock_client = MagicMock()
     mock_client.messages.batches.retrieve = AsyncMock(return_value=mock_batch)
