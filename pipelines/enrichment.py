@@ -247,11 +247,45 @@ async def process_results(batch_id: str) -> dict:
     }
 
 
+# ── Step 6: Prioritize ────────────────────────────────────────────────────────
+
+async def run_prioritize() -> dict:
+    """
+    Reads all rows from qualified_tam_v2 with account_fit_score >= 3 and
+    upserts them into priority_tam. Called after all enrichment batches complete.
+    """
+    sb = get_supabase()
+
+    rows = (
+        sb.table("qualified_tam_v2")
+        .select(
+            "domain, market, company_name, brevo_company_id, planhat_id, "
+            "open_deals, deal_lost_date, vertical, esp_detected, esp_score, "
+            "account_fit_score, account_narrative, email_crm_activity, "
+            "has_wallet, has_loyalty_program, needs_cdp"
+        )
+        .gte("account_fit_score", 3)
+        .execute()
+        .data
+    )
+
+    if not rows:
+        logger.info("prioritize: no qualifying rows")
+        return {"status": "ok", "prioritized": 0}
+
+    for i in range(0, len(rows), 100):
+        chunk = rows[i : i + 100]
+        sb.table("priority_tam").upsert(chunk, on_conflict="domain,market").execute()
+
+    logger.info("prioritize: upserted %d rows into priority_tam", len(rows))
+    return {"status": "ok", "prioritized": len(rows)}
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/pipelines/enrich")
 async def enrich():
-    """Submits qualified_tam_v2 rows to Claude Batch API. Returns batch_id."""
+    """Submits qualified_tam_v2 rows to Claude Batch API. Returns batch_ids."""
     return await submit_enrichment()
 
 
@@ -259,3 +293,9 @@ async def enrich():
 async def enrich_complete(batch_id: str):
     """Processes results for a completed batch. Returns pending if not done yet."""
     return await process_results(batch_id)
+
+
+@router.post("/pipelines/prioritize")
+async def prioritize():
+    """Promotes qualified_tam_v2 rows with fit score >= 3 into priority_tam."""
+    return await run_prioritize()

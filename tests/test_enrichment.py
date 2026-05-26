@@ -268,3 +268,40 @@ def test_complete_endpoint_skips_failed_results():
     assert body["enriched"] == 1
     upserted = mock_sb.table.return_value.upsert.call_args[0][0]
     assert upserted[0]["domain"] == "acme.com"
+
+
+# ── POST /pipelines/prioritize ────────────────────────────────────────────────
+
+def test_prioritize_endpoint_upserts_qualifying_rows():
+    mock_sb = MagicMock()
+    mock_sb.table.return_value.select.return_value.gte.return_value.execute.return_value = MagicMock(
+        data=[
+            {"domain": "acme.com", "market": "UK", "account_fit_score": 5,
+             "company_name": "Acme", "vertical": "SaaS"},
+            {"domain": "beta.com", "market": "UK", "account_fit_score": 3,
+             "company_name": "Beta", "vertical": "Retail"},
+        ]
+    )
+
+    with patch("pipelines.enrichment.get_supabase", return_value=mock_sb):
+        from api.main import app
+        tc = TestClient(app)
+        resp = tc.post("/pipelines/prioritize")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "prioritized": 2}
+    mock_sb.table.return_value.upsert.assert_called_once()
+
+
+def test_prioritize_endpoint_no_qualifying_rows():
+    mock_sb = MagicMock()
+    mock_sb.table.return_value.select.return_value.gte.return_value.execute.return_value = MagicMock(data=[])
+
+    with patch("pipelines.enrichment.get_supabase", return_value=mock_sb):
+        from api.main import app
+        tc = TestClient(app)
+        resp = tc.post("/pipelines/prioritize")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "prioritized": 0}
+    mock_sb.table.return_value.upsert.assert_not_called()
