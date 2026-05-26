@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+supabase
+asyncpg
+pydantic>=2
+python-dotenv
+httpx
+pytest
+pytest-asyncio
