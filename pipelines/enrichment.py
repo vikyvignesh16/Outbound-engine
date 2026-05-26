@@ -95,6 +95,9 @@ def _encode_custom_id(domain: str, market: str) -> str:
 
 
 def _decode_custom_id(custom_id: str) -> tuple[str, str]:
+    if "||" in custom_id:  # legacy batches submitted before encoding fix
+        domain, market = custom_id.split("||", 1)
+        return domain, market
     encoded_domain, market = custom_id.rsplit("_", 1)
     return encoded_domain.replace("_", "."), market
 
