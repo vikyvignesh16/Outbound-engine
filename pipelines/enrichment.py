@@ -215,6 +215,7 @@ async def process_results(batch_id: str) -> dict:
             "account_fit_score":   data.get("fit_score"),
             "vertical":            data.get("industry"),
             "account_narrative":   data.get("reasoning"),
+            "email_crm_activity":  data.get("email_crm_activity"),
             "has_wallet":          data.get("has_wallet", False),
             "has_loyalty_program": data.get("has_loyalty_program", False),
             "needs_cdp":           data.get("needs_cdp", False),
