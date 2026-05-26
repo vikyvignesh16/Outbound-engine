@@ -22,20 +22,17 @@ def validate_signature(raw_body: bytes, signature: str | None, secret_env: str) 
 
 def _transform_row(row: ClayTAMRow) -> dict:
     return {
-        "domain":           row.domain,
-        "market":           row.market(),
-        "company_name":     row.name,
-        "company_type":     row.company_type,
-        "employee_range":   row.size,
-        "location":         row.location,
-        "country":          row.country,
-        "linkedin_url":     row.linkedin_url,
-        "brevo_company_id": row.brevo_company_id or None,
-        "open_deals":       row.open_deals,
-        "deal_lost_date":   str(row.deal_lost_date) if row.deal_lost_date else None,
-        "vertical":         row.vertical,
-        "clay_id":          row.clay_id,
-        "raw":              row.model_dump(by_alias=True),
+        "domain":         row.domain,
+        "market":         row.market(),
+        "company_name":   row.name,
+        "company_type":   row.company_type,
+        "employee_range": row.size,
+        "location":       row.location,
+        "country":        row.country,
+        "linkedin_url":   row.linkedin_url,
+        "vertical":       row.vertical,
+        "clay_id":        row.clay_id,
+        "raw":            row.model_dump(by_alias=True),
     }
 
 

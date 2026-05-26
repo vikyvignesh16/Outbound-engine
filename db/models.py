@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, RootModel, field_validator
 from typing import Optional, List, Any
-from datetime import datetime, date
+from datetime import datetime
 
 COUNTRY_TO_MARKET: dict[str, str] = {
     "united kingdom": "UK",
@@ -26,18 +26,15 @@ COUNTRY_TO_MARKET: dict[str, str] = {
 class ClayTAMRow(BaseModel):
     model_config = {"populate_by_name": True}
 
-    name: str                       = Field(alias="Name")
-    company_type: Optional[str]     = Field(None, alias="Type")
-    size: Optional[str]             = Field(None, alias="Size")
-    location: Optional[str]         = Field(None, alias="Location")
-    country: Optional[str]          = Field(None, alias="Country")
-    linkedin_url: Optional[str]     = Field(None, alias="LinkedIn URL")
-    domain: str                     = Field(alias="Domain")
-    brevo_company_id: Optional[str] = Field(None, alias="Brevo Company ID")
-    open_deals: Optional[int]       = Field(None, alias="Nb Open Deals")
-    deal_lost_date: Optional[date]  = Field(None, alias="Deal Lost Date")
-    vertical: Optional[str]         = Field(None, alias="Primary Industry")
-    clay_id: Optional[str]          = Field(None, alias="ID")
+    name: str                   = Field(alias="Name")
+    company_type: Optional[str] = Field(None, alias="Type")
+    size: Optional[str]         = Field(None, alias="Size")
+    location: Optional[str]     = Field(None, alias="Location")
+    country: Optional[str]      = Field(None, alias="Country")
+    linkedin_url: Optional[str] = Field(None, alias="LinkedIn URL")
+    domain: str                 = Field(alias="Domain")
+    vertical: Optional[str]     = Field(None, alias="Primary Industry")
+    clay_id: Optional[str]      = Field(None, alias="ID")
 
     def market(self) -> str:
         return COUNTRY_TO_MARKET.get((self.country or "").lower(), self.country or "UNKNOWN")

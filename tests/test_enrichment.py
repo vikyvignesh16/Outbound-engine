@@ -1,0 +1,192 @@
+import json
+import os
+import pytest
+from unittest.mock import MagicMock, patch, AsyncMock
+
+os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
+os.environ.setdefault("SUPABASE_SERVICE_KEY", "test-key")
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://test")
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-anthropic-key")
+
+from pipelines.enrichment import build_prompt, build_batch_requests
+from fastapi.testclient import TestClient
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+SAMPLE_RESPONSE = {
+    "response": {
+        "industry": "Hospitality",
+        "employees": "~7000",
+        "email_crm_activity": "Runs a loyalty programme and sends promotional emails",
+        "fit_score": 5,
+        "reasoning": "Large hospitality group with 7000+ employees operating luxury hotels.",
+        "has_wallet": False,
+        "has_loyalty_program": True,
+        "needs_cdp": True,
+    }
+}
+
+
+async def _async_iter(items):
+    for item in items:
+        yield item
+
+
+def _make_result(custom_id: str, response_dict: dict, result_type: str = "succeeded"):
+    result = MagicMock()
+    result.custom_id = custom_id
+    result.result.type = result_type
+    if result_type == "succeeded":
+        result.result.message.content = [MagicMock(text=json.dumps(response_dict))]
+    return result
+
+
+# ── build_prompt ──────────────────────────────────────────────────────────────
+
+def test_build_prompt_contains_company_and_domain():
+    prompt = build_prompt("Acme Corp", "acme.com")
+    assert "Acme Corp" in prompt
+    assert "acme.com" in prompt
+
+
+def test_build_prompt_contains_json_template():
+    prompt = build_prompt("X", "x.com")
+    assert '"fit_score"' in prompt
+    assert '"has_wallet"' in prompt
+    assert '"needs_cdp"' in prompt
+
+
+# ── build_batch_requests ──────────────────────────────────────────────────────
+
+def test_build_batch_requests_format():
+    companies = [{"domain": "acme.com", "market": "UK", "company_name": "Acme"}]
+    reqs = build_batch_requests(companies)
+    assert len(reqs) == 1
+    assert reqs[0]["custom_id"] == "acme.com||UK"
+    assert reqs[0]["params"]["model"] == "claude-sonnet-4-6"
+    assert reqs[0]["params"]["messages"][0]["role"] == "user"
+
+
+def test_build_batch_requests_custom_id_separator():
+    # || separator must survive round-trip split
+    companies = [{"domain": "some.company.co.uk", "market": "UK", "company_name": "Co"}]
+    reqs = build_batch_requests(companies)
+    domain, market = reqs[0]["custom_id"].split("||", 1)
+    assert domain == "some.company.co.uk"
+    assert market == "UK"
+
+
+# ── POST /pipelines/enrich ────────────────────────────────────────────────────
+
+def test_submit_endpoint_no_rows():
+    mock_sb = MagicMock()
+    mock_sb.table.return_value.select.return_value.is_.return_value.execute.return_value = MagicMock(data=[])
+
+    with patch("pipelines.enrichment.get_supabase", return_value=mock_sb):
+        from api.main import app
+        tc = TestClient(app)
+        resp = tc.post("/pipelines/enrich")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "submitted": 0}
+
+
+def test_submit_endpoint_returns_batch_id():
+    mock_sb = MagicMock()
+    mock_sb.table.return_value.select.return_value.is_.return_value.execute.return_value = MagicMock(
+        data=[{"domain": "acme.com", "market": "UK", "company_name": "Acme"}]
+    )
+
+    mock_batch = MagicMock()
+    mock_batch.id = "batch_abc123"
+
+    mock_client = MagicMock()
+    mock_client.messages.batches.create = AsyncMock(return_value=mock_batch)
+
+    with patch("pipelines.enrichment.get_supabase", return_value=mock_sb), \
+         patch("pipelines.enrichment._get_client", return_value=mock_client):
+        from api.main import app
+        tc = TestClient(app)
+        resp = tc.post("/pipelines/enrich")
+
+    assert resp.status_code == 200
+    assert resp.json()["batch_id"] == "batch_abc123"
+    assert resp.json()["submitted"] == 1
+
+
+# ── POST /pipelines/enrich/complete ──────────────────────────────────────────
+
+def test_complete_endpoint_pending():
+    mock_batch = MagicMock()
+    mock_batch.processing_status = "in_progress"
+
+    mock_client = MagicMock()
+    mock_client.messages.batches.retrieve = AsyncMock(return_value=mock_batch)
+
+    with patch("pipelines.enrichment._get_client", return_value=mock_client):
+        from api.main import app
+        tc = TestClient(app)
+        resp = tc.post("/pipelines/enrich/complete?batch_id=batch_xyz")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "pending"
+    assert resp.json()["batch_id"] == "batch_xyz"
+
+
+def test_complete_endpoint_writes_results():
+    mock_batch = MagicMock()
+    mock_batch.processing_status = "ended"
+
+    mock_result = _make_result("acme.com||UK", SAMPLE_RESPONSE)
+
+    mock_client = MagicMock()
+    mock_client.messages.batches.retrieve = AsyncMock(return_value=mock_batch)
+    mock_client.messages.batches.results = MagicMock(return_value=_async_iter([mock_result]))
+
+    mock_sb = MagicMock()
+    mock_sb.table.return_value.upsert.return_value.execute.return_value = MagicMock()
+
+    with patch("pipelines.enrichment._get_client", return_value=mock_client), \
+         patch("pipelines.enrichment.get_supabase", return_value=mock_sb):
+        from api.main import app
+        tc = TestClient(app)
+        resp = tc.post("/pipelines/enrich/complete?batch_id=batch_xyz")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "enriched": 1}
+
+    upserted = mock_sb.table.return_value.upsert.call_args[0][0]
+    assert upserted[0]["domain"] == "acme.com"
+    assert upserted[0]["market"] == "UK"
+    assert upserted[0]["account_fit_score"] == 5
+    assert upserted[0]["vertical"] == "Hospitality"
+    assert upserted[0]["has_loyalty_program"] is True
+    assert upserted[0]["needs_cdp"] is True
+
+
+def test_complete_endpoint_skips_failed_results():
+    mock_batch = MagicMock()
+    mock_batch.processing_status = "ended"
+
+    failed_result = _make_result("bad.com||UK", {}, result_type="errored")
+    good_result = _make_result("acme.com||UK", SAMPLE_RESPONSE)
+
+    mock_client = MagicMock()
+    mock_client.messages.batches.retrieve = AsyncMock(return_value=mock_batch)
+    mock_client.messages.batches.results = MagicMock(
+        return_value=_async_iter([failed_result, good_result])
+    )
+
+    mock_sb = MagicMock()
+    mock_sb.table.return_value.upsert.return_value.execute.return_value = MagicMock()
+
+    with patch("pipelines.enrichment._get_client", return_value=mock_client), \
+         patch("pipelines.enrichment.get_supabase", return_value=mock_sb):
+        from api.main import app
+        tc = TestClient(app)
+        resp = tc.post("/pipelines/enrich/complete?batch_id=batch_xyz")
+
+    assert resp.json() == {"status": "ok", "enriched": 1}
+    upserted = mock_sb.table.return_value.upsert.call_args[0][0]
+    assert upserted[0]["domain"] == "acme.com"

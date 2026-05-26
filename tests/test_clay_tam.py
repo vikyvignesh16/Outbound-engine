@@ -20,9 +20,6 @@ WHITBREAD_ROW = {
     "Country": "United Kingdom",
     "LinkedIn URL": "https://www.linkedin.com/company/whitbread",
     "Domain": "whitbreadcareers.com",
-    "Brevo Company ID": "",
-    "Nb Open Deals": None,
-    "Deal Lost Date": None,
     "Primary Industry": "Hospitality",
     "ID": "https://www.linkedin.com/company/whitbread-United Kingdom",
 }
@@ -121,21 +118,6 @@ def test_unknown_country_stored_as_is(client):
 
     upserted_rows = mock_sb.table().upsert.call_args[0][0]
     assert upserted_rows[0]["market"] == "Narnia"
-
-
-def test_empty_brevo_company_id_coerced_to_none(client):
-    tc, mock_sb = client
-    body = json.dumps([WHITBREAD_ROW]).encode()
-    sig = _make_signature(body)
-
-    tc.post(
-        "/webhooks/clay/tam",
-        content=body,
-        headers={"x-clay-signature": sig, "content-type": "application/json"},
-    )
-
-    upserted_rows = mock_sb.table().upsert.call_args[0][0]
-    assert upserted_rows[0]["brevo_company_id"] is None
 
 
 def test_batch_of_multiple_rows(client):
