@@ -13,8 +13,11 @@ router = APIRouter()
 
 
 def validate_signature(raw_body: bytes, signature: str | None, secret_env: str) -> None:
-    """Raises 401 if the HMAC-SHA256 signature does not match."""
+    """Raises 401 if the HMAC-SHA256 signature does not match.
+    If the secret env var is not set, validation is skipped."""
     secret = os.environ.get(secret_env, "")
+    if not secret:
+        return
     expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, signature or ""):
         raise HTTPException(status_code=401, detail="Invalid signature")
