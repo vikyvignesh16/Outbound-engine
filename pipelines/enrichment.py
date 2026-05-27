@@ -388,10 +388,37 @@ async def process_all_pending() -> dict:
         prioritize_result = await run_prioritize()
         dbt_result = run_dbt_tests()
 
+        # Build score + ESP breakdown from DB
+        score_rows = (
+            sb.table("qualified_tam_v2")
+            .select("account_fit_score")
+            .not_.is_("account_fit_score", "null")
+            .execute()
+            .data
+        )
+        from collections import Counter
+        score_counts = Counter(r["account_fit_score"] for r in score_rows)
+        score_line = " | ".join(f"{s}★ {score_counts[s]}" for s in sorted(score_counts, reverse=True))
+
+        esp_rows = (
+            sb.table("qualified_tam_v2")
+            .select("esp_detected")
+            .not_.is_("esp_detected", "null")
+            .execute()
+            .data
+        )
+        esp_counts = Counter(r["esp_detected"] for r in esp_rows)
+        top_esp = sorted(esp_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        esp_line = " | ".join(f"{e} {c}" for e, c in top_esp)
+
         dbt_status = "✅ passed" if dbt_result["passed"] else "❌ failed"
         await notify(
-            f"✅ *Enrichment complete* — enriched {total_enriched} companies, "
-            f"prioritized {prioritize_result['prioritized']}, dbt {dbt_status}"
+            f"✅ *Enrichment complete*\n"
+            f"• Enriched: {total_enriched} companies\n"
+            f"• Fit scores: {score_line}\n"
+            f"• ESP detected: {esp_line or 'none'}\n"
+            f"• Priority TAM: {prioritize_result['prioritized']} companies pushed\n"
+            f"• dbt: {dbt_status}"
         )
 
         return {

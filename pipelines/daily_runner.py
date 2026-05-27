@@ -18,10 +18,13 @@ async def _run_daily_bg() -> None:
         tech   = await run_technographic()
         enrich = await submit_enrichment()
         await notify(
-            f"✅ *Daily pipeline* — qualified {rules['qualified']} rows, "
-            f"submitted {enrich['submitted']} to enrichment ({enrich['batches']} batches)"
+            f"✅ *Daily pipeline complete*\n"
+            f"• CRM checked: {crm['processed']} companies\n"
+            f"• Qualified: {rules['qualified']} companies\n"
+            f"• Technographic: {tech['processed']} companies\n"
+            f"• Submitted to enrichment: {enrich['submitted']} ({enrich['batches']} batches)"
         )
-        logger.info("daily_runner: complete — qualified=%d submitted=%d", rules["qualified"], enrich["submitted"])
+        logger.info("daily_runner: complete — crm=%d qualified=%d submitted=%d", crm["processed"], rules["qualified"], enrich["submitted"])
     except Exception as exc:
         await notify(f"❌ *Daily pipeline failed* — `{exc}`", success=False)
         logger.exception("daily_runner: failed")
