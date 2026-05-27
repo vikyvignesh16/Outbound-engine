@@ -111,7 +111,7 @@ async def run_crm_check() -> dict:
         return {"status": "ok", "processed": 0}
 
     logger.info("crm_check: processing %d domains", len(rows))
-    semaphore = asyncio.Semaphore(5)
+    semaphore = asyncio.Semaphore(25)
 
     async def fetch_one(row: dict) -> None:
         domain = row["domain"]
@@ -261,7 +261,7 @@ async def run_technographic() -> dict:
         return {"status": "ok", "processed": 0}
 
     logger.info("technographic: processing %d domains", len(rows))
-    semaphore = asyncio.Semaphore(5)
+    semaphore = asyncio.Semaphore(25)
 
     async def fetch_one(row: dict) -> dict | None:
         domain = row["domain"]
