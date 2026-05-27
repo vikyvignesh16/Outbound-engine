@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
@@ -93,22 +93,26 @@ async def run_monthly_batch() -> dict:
 
 async def push_batch_to_clay(batch_number: int) -> dict:
     """
-    Reads campaign_batches for the given batch_number, groups by market,
-    and POSTs each group concurrently to the corresponding CLAY_WEBHOOK_{MARKET} env var URL.
+    Reads unpushed campaign_batches for the given batch_number (clay_pushed_at IS NULL),
+    POSTs each sequentially to the corresponding CLAY_WEBHOOK_{MARKET} env var URL,
+    then stamps clay_pushed_at to prevent double-sends.
     """
+    sb = get_supabase()
+
     rows = fetch_all(
         "campaign_batches",
-        "domain, market, company_name, company_type, employee_range, "
+        "id, domain, market, company_name, company_type, employee_range, "
         "location, country, linkedin_url, vertical, "
         "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
         "esp_detected, esp_score, account_fit_score, account_narrative, "
         "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp, "
         "batch_month",
-        filters=[("eq", "batch_number", batch_number)],
+        filters=[("eq", "batch_number", batch_number), ("is_", "clay_pushed_at", "null")],
     )
 
     if not rows:
-        raise HTTPException(status_code=404, detail=f"No companies found for batch_number={batch_number}")
+        logger.info("monthly_batch: batch %d already fully pushed — nothing to send", batch_number)
+        return {"status": "ok", "batch_number": batch_number, "webhooks": {}, "already_pushed": True}
 
     by_webhook: dict[str, list] = {}
     for row in rows:
@@ -135,8 +139,15 @@ async def push_batch_to_clay(batch_number: int) -> dict:
                 logger.warning("monthly_batch: %s not configured — skipping %d companies", webhook_key, len(companies))
                 results[webhook_key] = {"status": "skipped", "reason": "no_webhook_configured", "companies": len(companies)}
                 return
+            pushed_at = datetime.now(timezone.utc).isoformat()
+            pushed_ids = []
             for company in companies:
+                row_id = company.pop("id")
                 await push_one(webhook_url, company)
+                pushed_ids.append(row_id)
+            # Stamp clay_pushed_at in chunks to mark as sent
+            for i in range(0, len(pushed_ids), 100):
+                sb.table("campaign_batches").update({"clay_pushed_at": pushed_at}).in_("id", pushed_ids[i : i + 100]).execute()
             logger.info("monthly_batch: pushed %d companies via %s", len(companies), webhook_key)
             results[webhook_key] = {"status": "ok", "companies": len(companies)}
 
