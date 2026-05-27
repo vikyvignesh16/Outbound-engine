@@ -1,3 +1,4 @@
+import ssl
 from supabase import create_client, Client
 import asyncpg
 import os
@@ -17,4 +18,8 @@ def get_supabase() -> Client:
 supabase = get_supabase
 
 async def get_pg():
-    return await asyncpg.connect(os.environ["SUPABASE_DB_URL"], ssl="require")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = os.environ["SUPABASE_DB_URL"].split("?")[0]  # strip sslmode query param
+    return await asyncpg.connect(url, ssl=ctx)
