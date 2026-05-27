@@ -54,12 +54,42 @@ following:
        company with a significant customer communication layer)
    - 4 = Good fit — 100+ employees, likely sends emails or manages
        customer relationships but ICP match is slightly less clear
-   - 3 = Possible fit — near the 100 employee threshold or ICP fit
-       is uncertain but there are positive signals
-   - 2 = Weak fit — fewer than 100 employees or very limited
-       observable customer communication activity
-   - 1 = Poor fit — under 50 employees, purely B2B services with
-       no end-customer communication layer, or no digital presence
+   - 3 = Possible fit — EITHER: near the 100 employee threshold with
+       positive signals; OR fewer than 100 employees but with strong
+       observable signals in ANY of the following:
+         · Active email marketing or newsletter programme with an
+           engaged subscriber base or community
+         · A loyalty or rewards programme (points, tiers, cashback,
+           membership cards)
+         · A digital wallet or stored-value product
+         · Clear need for a Customer Data Platform (multiple channels,
+           fragmented data, personalisation at scale)
+         · A highly active online community or membership model that
+           drives significant recurring communications
+       Size alone should not disqualify a company if these signals
+       are strong — a 50-person company with a loyalty programme and
+       active newsletter is a better Brevo fit than a 200-person
+       company with no observable communication layer.
+   - 2 = Weak fit — fewer than 100 employees AND limited observable
+       customer communication activity, no loyalty/wallet/CDP signals
+   - 1 = Poor fit — score 1 if ANY of the following apply:
+         · Under 50 employees with no loyalty/wallet/CDP/email signals
+         · Purely B2B services with no end-customer communication
+           layer (e.g. recruitment agencies, software consultancies,
+           B2B manufacturers, contract services firms — companies
+           whose customers are other businesses and who do not run
+           consumer-facing marketing, lifecycle, or loyalty programmes)
+         · Non-commercial entity — student society, non-profit,
+           charity, government body, academic institution, or
+           religious organisation
+         · Individual distributor or franchisee operating under a
+           parent brand's infrastructure (e.g. MLM distributors,
+           single-agent franchises) with no independent communication
+           layer of their own
+         · No verifiable digital presence or business identity
+         · Geographic mismatch — company is clearly not based in
+           the UK or Ireland (e.g. operating solely in the US, Asia,
+           Australia, or other non-target markets)
 
 5. Does the company have a digital wallet or payment wallet product?
    (look for signs like a branded wallet, stored value card, prepaid
