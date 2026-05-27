@@ -17,4 +17,4 @@ def get_supabase() -> Client:
 supabase = get_supabase
 
 async def get_pg():
-    return await asyncpg.connect(os.environ["SUPABASE_DB_URL"])
+    return await asyncpg.connect(os.environ["SUPABASE_DB_URL"], ssl="require")
