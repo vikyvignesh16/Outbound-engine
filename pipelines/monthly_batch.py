@@ -4,65 +4,56 @@ import os
 from datetime import date
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
-from db.client import get_supabase
+from db.client import get_supabase, fetch_all
+from utils.slack import notify
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 UK_LIMIT     = 500
 DACH_LIMIT   = 500
+UKI_MARKETS  = {"UK", "Ireland"}
 DACH_MARKETS = {"DE", "AT", "CH"}
 
-# Maps individual market codes → Clay webhook env var key.
-# DACH markets (DE, AT, CH) share one webhook.
 MARKET_TO_WEBHOOK_KEY: dict[str, str] = {
-    "UK": "CLAY_WEBHOOK_UK",
-    "DE": "CLAY_WEBHOOK_DACH",
-    "AT": "CLAY_WEBHOOK_DACH",
-    "CH": "CLAY_WEBHOOK_DACH",
+    "UK":      "CLAY_WEBHOOK_UK",
+    "Ireland": "CLAY_WEBHOOK_UK",
+    "DE":      "CLAY_WEBHOOK_DACH",
+    "AT":      "CLAY_WEBHOOK_DACH",
+    "CH":      "CLAY_WEBHOOK_DACH",
 }
 
 
 async def run_monthly_batch() -> dict:
     """
-    Selects the next BATCH_LIMIT never-contacted companies from priority_tam,
+    Selects the next batch of never-contacted companies from priority_tam,
     ordered by account_fit_score DESC then prioritized_at ASC, and inserts
     them into campaign_batches with an auto-incrementing batch_number.
     """
     sb = get_supabase()
 
-    existing = (
-        sb.table("campaign_batches")
-        .select("domain, market, company_name, batch_number")
-        .execute()
-        .data
-    )
+    existing = fetch_all("campaign_batches", "domain, market, company_name, batch_number")
     contacted = {(r["domain"], r["market"], r["company_name"]) for r in existing}
     next_batch_number = max((r["batch_number"] for r in existing), default=0) + 1
 
-    candidates = (
-        sb.table("priority_tam")
-        .select(
-            "domain, market, company_name, company_type, employee_range, "
-            "location, country, linkedin_url, vertical, "
-            "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
-            "esp_detected, esp_score, account_fit_score, account_narrative, "
-            "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp"
-        )
-        .order("account_fit_score", desc=True)
-        .order("prioritized_at", desc=False)
-        .execute()
-        .data
+    candidates = fetch_all(
+        "priority_tam",
+        "domain, market, company_name, company_type, employee_range, "
+        "location, country, linkedin_url, vertical, "
+        "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
+        "esp_detected, esp_score, account_fit_score, account_narrative, "
+        "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp",
+        order_by=[("account_fit_score", True), ("prioritized_at", False)],
     )
 
     batch_month = date.today().replace(day=1).isoformat()
 
-    uk_selected = [
+    uki_selected = [
         {**row, "batch_number": next_batch_number, "batch_month": batch_month}
         for row in candidates
-        if row["market"] == "UK"
+        if row["market"] in UKI_MARKETS
         and (row["domain"], row["market"], row["company_name"]) not in contacted
     ][:UK_LIMIT]
 
@@ -73,13 +64,13 @@ async def run_monthly_batch() -> dict:
         and (row["domain"], row["market"], row["company_name"]) not in contacted
     ][:DACH_LIMIT]
 
-    selected = uk_selected + dach_selected
+    selected = uki_selected + dach_selected
 
     if not selected:
         logger.info("monthly_batch: no new candidates to select")
         return {
             "status": "ok", "selected": 0,
-            "uk_selected": 0, "dach_selected": 0,
+            "uki_selected": 0, "dach_selected": 0,
             "batch_number": next_batch_number, "batch_month": batch_month,
         }
 
@@ -87,13 +78,13 @@ async def run_monthly_batch() -> dict:
         sb.table("campaign_batches").insert(selected[i : i + 100]).execute()
 
     logger.info(
-        "monthly_batch: inserted %d companies as batch #%d (%s) — UK=%d DACH=%d",
-        len(selected), next_batch_number, batch_month, len(uk_selected), len(dach_selected),
+        "monthly_batch: inserted %d companies as batch #%d (%s) — UKI=%d DACH=%d",
+        len(selected), next_batch_number, batch_month, len(uki_selected), len(dach_selected),
     )
     return {
         "status":        "ok",
         "selected":      len(selected),
-        "uk_selected":   len(uk_selected),
+        "uki_selected":  len(uki_selected),
         "dach_selected": len(dach_selected),
         "batch_number":  next_batch_number,
         "batch_month":   batch_month,
@@ -103,46 +94,43 @@ async def run_monthly_batch() -> dict:
 async def push_batch_to_clay(batch_number: int) -> dict:
     """
     Reads campaign_batches for the given batch_number, groups by market,
-    and POSTs each group to the corresponding CLAY_WEBHOOK_{MARKET} env var URL.
-    Markets with no webhook configured are skipped with a warning.
+    and POSTs each group concurrently to the corresponding CLAY_WEBHOOK_{MARKET} env var URL.
     """
-    sb = get_supabase()
-
-    rows = (
-        sb.table("campaign_batches")
-        .select(
-            "domain, market, company_name, company_type, employee_range, "
-            "location, country, linkedin_url, vertical, "
-            "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
-            "esp_detected, esp_score, account_fit_score, account_narrative, "
-            "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp, "
-            "batch_month"
-        )
-        .eq("batch_number", batch_number)
-        .execute()
-        .data
+    rows = fetch_all(
+        "campaign_batches",
+        "domain, market, company_name, company_type, employee_range, "
+        "location, country, linkedin_url, vertical, "
+        "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
+        "esp_detected, esp_score, account_fit_score, account_narrative, "
+        "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp, "
+        "batch_month",
+        filters=[("eq", "batch_number", batch_number)],
     )
 
     if not rows:
         raise HTTPException(status_code=404, detail=f"No companies found for batch_number={batch_number}")
 
-    # Group by webhook key so DACH markets (DE, AT, CH) merge into one POST
     by_webhook: dict[str, list] = {}
     for row in rows:
         key = MARKET_TO_WEBHOOK_KEY.get(row["market"], f"CLAY_WEBHOOK_{row['market'].upper()}")
         by_webhook.setdefault(key, []).append(row)
 
     results = {}
+    semaphore = asyncio.Semaphore(10)
+
     async with httpx.AsyncClient(timeout=30.0) as client:
+        async def push_one(webhook_url: str, company: dict) -> None:
+            async with semaphore:
+                resp = await client.post(webhook_url, json=company)
+                resp.raise_for_status()
+
         async def push_group(webhook_key: str, companies: list) -> None:
             webhook_url = os.environ.get(webhook_key)
             if not webhook_url:
                 logger.warning("monthly_batch: %s not configured — skipping %d companies", webhook_key, len(companies))
                 results[webhook_key] = {"status": "skipped", "reason": "no_webhook_configured", "companies": len(companies)}
                 return
-            for company in companies:
-                resp = await client.post(webhook_url, json=company)
-                resp.raise_for_status()
+            await asyncio.gather(*[push_one(webhook_url, c) for c in companies])
             logger.info("monthly_batch: pushed %d companies via %s", len(companies), webhook_key)
             results[webhook_key] = {"status": "ok", "companies": len(companies)}
 
@@ -151,9 +139,34 @@ async def push_batch_to_clay(batch_number: int) -> dict:
     return {"status": "ok", "batch_number": batch_number, "webhooks": results}
 
 
+async def _run_monthly_bg() -> None:
+    try:
+        batch_result = await run_monthly_batch()
+        if batch_result["selected"] > 0:
+            push_result = await push_batch_to_clay(batch_result["batch_number"])
+        else:
+            push_result = {"webhooks": {}}
+
+        webhook_summary = " | ".join(
+            f"{k.replace('CLAY_WEBHOOK_', '')}: {v.get('companies', 0)}"
+            for k, v in push_result.get("webhooks", {}).items()
+        ) or "none"
+
+        await notify(
+            f"✅ *Monthly batch complete*\n"
+            f"• Batch #{batch_result['batch_number']} ({batch_result['batch_month']}) — {batch_result['selected']} companies\n"
+            f"• UKI: {batch_result['uki_selected']} | DACH: {batch_result['dach_selected']}\n"
+            f"• Pushed to Clay: {webhook_summary}"
+        )
+    except Exception as exc:
+        await notify(f"❌ *Monthly batch failed* — `{exc}`", success=False)
+        logger.exception("monthly_batch: background task failed")
+        raise
+
+
 @router.post("/pipelines/monthly-batch")
 async def monthly_batch():
-    """Selects next 1000 uncontacted priority companies and logs them to campaign_batches."""
+    """Selects next batch of uncontacted priority companies and logs them to campaign_batches."""
     return await run_monthly_batch()
 
 
@@ -164,19 +177,7 @@ async def monthly_batch_push(batch_number: int):
 
 
 @router.post("/pipelines/run-monthly")
-async def run_monthly():
-    """1st-of-month cron: select campaign batch then run dbt tests."""
-    from pipelines.dbt_runner import run_dbt_tests
-    from utils.slack import notify
-    try:
-        batch_result = await run_monthly_batch()
-        dbt_result = run_dbt_tests()
-        dbt_status = "✅ passed" if dbt_result["passed"] else "❌ failed"
-        await notify(
-            f"✅ *Monthly batch* — batch #{batch_result['batch_number']}, "
-            f"UK={batch_result['uk_selected']} DACH={batch_result['dach_selected']}, dbt {dbt_status}"
-        )
-        return {"batch": batch_result, "dbt": dbt_result}
-    except Exception as exc:
-        await notify(f"❌ *Monthly batch failed* — `{exc}`", success=False)
-        raise
+async def run_monthly(background_tasks: BackgroundTasks):
+    """1st-of-month cron: select batch + push to Clay. Runs in background to avoid timeout."""
+    background_tasks.add_task(_run_monthly_bg)
+    return {"status": "started"}
