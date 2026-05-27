@@ -22,12 +22,16 @@ def run_dbt_tests() -> dict:
         "DBT_POSTGRES_DBNAME":   (url.path or "").lstrip("/"),
     }
 
-    result = subprocess.run(
-        ["dbt", "test", "--profiles-dir", "dbt", "--project-dir", "dbt", "--target", "prod"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            ["dbt", "test", "--profiles-dir", "dbt", "--project-dir", "dbt", "--target", "prod"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except FileNotFoundError:
+        logger.warning("dbt: dbt command not found — skipping tests")
+        return {"passed": False, "stdout": "", "stderr": "dbt not installed"}
 
     logger.info("dbt: returncode=%d", result.returncode)
     return {
