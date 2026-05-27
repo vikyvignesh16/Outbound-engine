@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import pytest
@@ -66,22 +67,22 @@ def test_build_batch_requests_format():
     companies = [{"domain": "acme.com", "market": "UK", "company_name": "Acme"}]
     reqs = build_batch_requests(companies)
     assert len(reqs) == 1
-    assert reqs[0]["custom_id"] == "acme_com_UK"
+    expected_id = hashlib.sha256("acme.com||UK||Acme".encode()).hexdigest()[:64]
+    assert reqs[0]["custom_id"] == expected_id
     assert reqs[0]["params"]["model"] == "claude-sonnet-4-6"
     assert reqs[0]["params"]["messages"][0]["role"] == "user"
 
 
 def test_build_batch_requests_custom_id_separator():
     # custom_id must only use [a-zA-Z0-9_-] (Claude Batch API requirement)
-    from pipelines.enrichment import _encode_custom_id, _decode_custom_id
+    # New format: 64-char lowercase hex SHA256 hash
+    import re
     companies = [{"domain": "some.company.co.uk", "market": "UK", "company_name": "Co"}]
     reqs = build_batch_requests(companies)
     custom_id = reqs[0]["custom_id"]
-    import re
-    assert re.match(r'^[a-zA-Z0-9_-]+$', custom_id), f"Invalid custom_id: {custom_id}"
-    domain, market = _decode_custom_id(custom_id)
-    assert domain == "some.company.co.uk"
-    assert market == "UK"
+    assert re.match(r'^[a-f0-9]{64}$', custom_id), f"Invalid custom_id: {custom_id}"
+    expected = hashlib.sha256("some.company.co.uk||UK||Co".encode()).hexdigest()[:64]
+    assert custom_id == expected
 
 
 # ── POST /pipelines/enrich ────────────────────────────────────────────────────
@@ -151,6 +152,9 @@ def test_submit_endpoint_writes_tracking_row():
     assert payload["model"] == "claude-sonnet-4-6"
     assert payload["status"] == "pending"
     assert payload["companies_submitted"] == 1
+    assert "request_mapping" in payload
+    assert isinstance(payload["request_mapping"], dict)
+    assert len(payload["request_mapping"]) == 1
 
 
 def test_submit_endpoint_chunks_into_500():
@@ -201,6 +205,7 @@ def test_complete_endpoint_writes_results():
     mock_batch = MagicMock()
     mock_batch.processing_status = "ended"
 
+    # Use legacy-style custom_id — no mapping in DB triggers the decode fallback
     mock_result = _make_result("acme_com_UK", SAMPLE_RESPONSE)
 
     mock_client = MagicMock()
@@ -208,6 +213,8 @@ def test_complete_endpoint_writes_results():
     mock_client.messages.batches.results = AsyncMock(return_value=_async_iter([mock_result]))
 
     mock_sb = MagicMock()
+    # Empty request_mapping → legacy decode path
+    mock_sb.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
     mock_sb.table.return_value.upsert.return_value.execute.return_value = MagicMock()
 
     with patch("pipelines.enrichment._get_client", return_value=mock_client), \
@@ -255,6 +262,7 @@ def test_complete_endpoint_skips_failed_results():
     )
 
     mock_sb = MagicMock()
+    mock_sb.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
     mock_sb.table.return_value.upsert.return_value.execute.return_value = MagicMock()
 
     with patch("pipelines.enrichment._get_client", return_value=mock_client), \

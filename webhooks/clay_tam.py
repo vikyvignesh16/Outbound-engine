@@ -40,7 +40,7 @@ def _upsert_in_chunks(rows: list[dict], chunk_size: int = 100) -> None:
     sb = get_supabase()
     for i in range(0, len(rows), chunk_size):
         chunk = rows[i : i + chunk_size]
-        sb.table("sourced_tam_v2").upsert(chunk, on_conflict="domain,market").execute()
+        sb.table("sourced_tam_v2").upsert(chunk, on_conflict="domain,market,company_name").execute()
         logger.info("clay_tam: upserted rows %d-%d", i, i + len(chunk))
     logger.info("clay_tam: total accepted %d", len(rows))
 

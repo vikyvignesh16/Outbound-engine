@@ -199,7 +199,7 @@ async def run_qualification_rules() -> dict:
     if qualified_rows:
         for i in range(0, len(qualified_rows), 100):
             chunk = qualified_rows[i : i + 100]
-            sb.table("qualified_tam_v2").upsert(chunk, on_conflict="domain,market").execute()
+            sb.table("qualified_tam_v2").upsert(chunk, on_conflict="domain,market,company_name").execute()
 
     logger.info("qualification_rules: qualified=%d disqualified=%d", len(qualified_rows), disqualified)
     return {"status": "ok", "qualified": len(qualified_rows), "disqualified": disqualified}

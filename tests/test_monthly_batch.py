@@ -9,9 +9,9 @@ os.environ.setdefault("SUPABASE_DB_URL", "postgresql://test")
 from fastapi.testclient import TestClient
 
 PRIORITY_ROWS = [
-    {"domain": "acme.com",   "market": "UK", "company_name": "Acme",  "account_fit_score": 5, "vertical": "SaaS"},
-    {"domain": "beta.com",   "market": "UK", "company_name": "Beta",  "account_fit_score": 4, "vertical": "Retail"},
-    {"domain": "gamma.com",  "market": "UK", "company_name": "Gamma", "account_fit_score": 3, "vertical": "Fintech"},
+    {"domain": "acme.com",  "market": "UK", "company_name": "Acme",  "account_fit_score": 5, "vertical": "SaaS"},
+    {"domain": "beta.com",  "market": "UK", "company_name": "Beta",  "account_fit_score": 4, "vertical": "Retail"},
+    {"domain": "gamma.com", "market": "UK", "company_name": "Gamma", "account_fit_score": 3, "vertical": "Fintech"},
 ]
 
 
@@ -44,34 +44,45 @@ def test_monthly_batch_selects_uncontacted():
     body = resp.json()
     assert body["status"] == "ok"
     assert body["selected"] == 3
+    assert body["uk_selected"] == 3
+    assert body["dach_selected"] == 0
     assert body["batch_number"] == 1
 
 
 def test_monthly_batch_skips_already_contacted():
-    already = [{"domain": "acme.com", "market": "UK", "batch_number": 1}]
+    already = [{"domain": "acme.com", "market": "UK", "company_name": "Acme", "batch_number": 1}]
     mock_sb, campaign_tbl, _ = _make_mock(campaign_rows=already)
     with patch("pipelines.monthly_batch.get_supabase", return_value=mock_sb):
         from api.main import app
         resp = TestClient(app).post("/pipelines/monthly-batch")
     body = resp.json()
     assert body["selected"] == 2
+    assert body["uk_selected"] == 2
     assert body["batch_number"] == 2
     inserted = campaign_tbl.insert.call_args[0][0]
     domains = [r["domain"] for r in inserted]
     assert "acme.com" not in domains
 
 
-def test_monthly_batch_respects_1000_limit():
-    big_list = [
-        {"domain": f"co{i}.com", "market": "UK", "company_name": f"Co{i}",
+def test_monthly_batch_respects_500_per_market_limit():
+    uk_rows = [
+        {"domain": f"uk{i}.com", "market": "UK", "company_name": f"UK{i}",
          "account_fit_score": 3, "vertical": "SaaS"}
-        for i in range(1200)
+        for i in range(600)
     ]
-    mock_sb, campaign_tbl, _ = _make_mock(priority_rows=big_list)
+    dach_rows = [
+        {"domain": f"de{i}.com", "market": "DE", "company_name": f"DE{i}",
+         "account_fit_score": 3, "vertical": "SaaS"}
+        for i in range(600)
+    ]
+    mock_sb, campaign_tbl, _ = _make_mock(priority_rows=uk_rows + dach_rows)
     with patch("pipelines.monthly_batch.get_supabase", return_value=mock_sb):
         from api.main import app
         resp = TestClient(app).post("/pipelines/monthly-batch")
-    assert resp.json()["selected"] == 1000
+    body = resp.json()
+    assert body["selected"] == 1000
+    assert body["uk_selected"] == 500
+    assert body["dach_selected"] == 500
     total_inserted = sum(
         len(call[0][0]) for call in campaign_tbl.insert.call_args_list
     )
@@ -86,6 +97,8 @@ def test_monthly_batch_no_candidates():
     body = resp.json()
     assert body["status"] == "ok"
     assert body["selected"] == 0
+    assert body["uk_selected"] == 0
+    assert body["dach_selected"] == 0
     campaign_tbl.insert.assert_not_called()
 
 
@@ -103,7 +116,7 @@ def test_monthly_batch_correct_batch_month():
 
 def test_monthly_batch_increments_batch_number():
     existing = [
-        {"domain": "old.com", "market": "UK", "batch_number": 3},
+        {"domain": "old.com", "market": "UK", "company_name": "Old", "batch_number": 3},
     ]
     mock_sb, campaign_tbl, _ = _make_mock(campaign_rows=existing)
     with patch("pipelines.monthly_batch.get_supabase", return_value=mock_sb):
@@ -117,10 +130,10 @@ def test_monthly_batch_increments_batch_number():
 # ── POST /pipelines/monthly-batch/push ───────────────────────────────────────
 
 BATCH_1_ROWS = [
-    {"domain": "acme.com",    "market": "UK", "company_name": "Acme",    "account_fit_score": 5, "vertical": "SaaS",   "batch_month": "2026-05-01"},
-    {"domain": "berlin.de",   "market": "DE", "company_name": "Berlin",  "account_fit_score": 4, "vertical": "Retail", "batch_month": "2026-05-01"},
-    {"domain": "vienna.at",   "market": "AT", "company_name": "Vienna",  "account_fit_score": 4, "vertical": "Retail", "batch_month": "2026-05-01"},
-    {"domain": "zurich.ch",   "market": "CH", "company_name": "Zurich",  "account_fit_score": 3, "vertical": "Fintech","batch_month": "2026-05-01"},
+    {"domain": "acme.com",  "market": "UK", "company_name": "Acme",   "account_fit_score": 5, "vertical": "SaaS",   "batch_month": "2026-05-01"},
+    {"domain": "berlin.de", "market": "DE", "company_name": "Berlin", "account_fit_score": 4, "vertical": "Retail", "batch_month": "2026-05-01"},
+    {"domain": "vienna.at", "market": "AT", "company_name": "Vienna", "account_fit_score": 4, "vertical": "Retail", "batch_month": "2026-05-01"},
+    {"domain": "zurich.ch", "market": "CH", "company_name": "Zurich", "account_fit_score": 3, "vertical": "Fintech","batch_month": "2026-05-01"},
 ]
 
 

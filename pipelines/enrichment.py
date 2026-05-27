@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -91,12 +92,14 @@ code fences, and no text outside it:
 
 # ── Batch helpers ─────────────────────────────────────────────────────────────
 
-def _encode_custom_id(domain: str, market: str) -> str:
-    return f"{domain.replace('.', '_')}_{market}"
+def _encode_custom_id(domain: str, market: str, company_name: str = "") -> str:
+    raw = f"{domain}||{market}||{company_name}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:64]
 
 
 def _decode_custom_id(custom_id: str) -> tuple[str, str]:
-    if "||" in custom_id:  # legacy batches submitted before encoding fix
+    """Legacy decode — only used for batches submitted before the hash-based encoding."""
+    if "||" in custom_id:
         domain, market = custom_id.split("||", 1)
         return domain, market
     encoded_domain, market = custom_id.rsplit("_", 1)
@@ -106,7 +109,7 @@ def _decode_custom_id(custom_id: str) -> tuple[str, str]:
 def build_batch_requests(companies: list[dict]) -> list[dict]:
     return [
         {
-            "custom_id": _encode_custom_id(row["domain"], row["market"]),
+            "custom_id": _encode_custom_id(row["domain"], row["market"], row.get("company_name", "")),
             "params": {
                 "model": "claude-sonnet-4-6",
                 "max_tokens": 1000,
@@ -152,11 +155,20 @@ async def submit_enrichment() -> dict:
 
     async def submit_chunk(chunk: list[dict]) -> str:
         batch = await client.messages.batches.create(requests=build_batch_requests(chunk))
+        mapping = {
+            _encode_custom_id(c["domain"], c["market"], c.get("company_name", "")): {
+                "domain":       c["domain"],
+                "market":       c["market"],
+                "company_name": c.get("company_name", ""),
+            }
+            for c in chunk
+        }
         sb.table("enrichment_batches").insert({
             "batch_id":            batch.id,
             "model":               "claude-sonnet-4-6",
             "status":              "pending",
             "companies_submitted": len(chunk),
+            "request_mapping":     mapping,
         }).execute()
         logger.info("enrichment: submitted batch %s for %d companies", batch.id, len(chunk))
         return batch.id
@@ -181,6 +193,16 @@ async def process_results(batch_id: str) -> dict:
         return {"status": "pending", "batch_id": batch_id}
 
     sb = get_supabase()
+
+    batch_row = (
+        sb.table("enrichment_batches")
+        .select("request_mapping")
+        .eq("batch_id", batch_id)
+        .execute()
+        .data
+    )
+    request_mapping: dict = batch_row[0]["request_mapping"] if batch_row else {}
+
     updates = []
     total_input = 0
     total_output = 0
@@ -208,10 +230,24 @@ async def process_results(batch_id: str) -> dict:
         total_input  += usage.input_tokens
         total_output += usage.output_tokens
 
-        domain, market = _decode_custom_id(result.custom_id)
+        company_info = request_mapping.get(result.custom_id)
+        if company_info is not None:
+            domain       = company_info["domain"]
+            market       = company_info["market"]
+            company_name = company_info.get("company_name", "")
+        else:
+            # Legacy batch submitted before hash-based encoding — fall back to decode
+            try:
+                domain, market = _decode_custom_id(result.custom_id)
+                company_name = ""
+            except Exception:
+                logger.warning("enrichment: cannot resolve custom_id %s — skipping", result.custom_id)
+                continue
+
         updates.append({
             "domain":              domain,
             "market":              market,
+            "company_name":        company_name,
             "account_fit_score":   data.get("fit_score"),
             "vertical":            data.get("industry"),
             "account_narrative":   data.get("reasoning"),
@@ -223,7 +259,7 @@ async def process_results(batch_id: str) -> dict:
 
     for i in range(0, len(updates), 100):
         chunk = updates[i : i + 100]
-        sb.table("qualified_tam_v2").upsert(chunk, on_conflict="domain,market").execute()
+        sb.table("qualified_tam_v2").upsert(chunk, on_conflict="domain,market,company_name").execute()
 
     cost = (total_input * _BATCH_INPUT_COST_PER_TOKEN
           + total_output * _BATCH_OUTPUT_COST_PER_TOKEN)
@@ -275,7 +311,7 @@ async def run_prioritize() -> dict:
 
     for i in range(0, len(rows), 100):
         chunk = rows[i : i + 100]
-        sb.table("priority_tam").upsert(chunk, on_conflict="domain,market").execute()
+        sb.table("priority_tam").upsert(chunk, on_conflict="domain,market,company_name").execute()
 
     logger.info("prioritize: upserted %d rows into priority_tam", len(rows))
     return {"status": "ok", "prioritized": len(rows)}

@@ -11,7 +11,9 @@ from db.client import get_supabase
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-BATCH_LIMIT = 1000
+UK_LIMIT     = 500
+DACH_LIMIT   = 500
+DACH_MARKETS = {"DE", "AT", "CH"}
 
 # Maps individual market codes → Clay webhook env var key.
 # DACH markets (DE, AT, CH) share one webhook.
@@ -33,11 +35,11 @@ async def run_monthly_batch() -> dict:
 
     existing = (
         sb.table("campaign_batches")
-        .select("domain, market, batch_number")
+        .select("domain, market, company_name, batch_number")
         .execute()
         .data
     )
-    contacted = {(r["domain"], r["market"]) for r in existing}
+    contacted = {(r["domain"], r["market"], r["company_name"]) for r in existing}
     next_batch_number = max((r["batch_number"] for r in existing), default=0) + 1
 
     candidates = (
@@ -50,28 +52,45 @@ async def run_monthly_batch() -> dict:
     )
 
     batch_month = date.today().replace(day=1).isoformat()
-    selected = [
+
+    uk_selected = [
         {**row, "batch_number": next_batch_number, "batch_month": batch_month}
         for row in candidates
-        if (row["domain"], row["market"]) not in contacted
-    ][:BATCH_LIMIT]
+        if row["market"] == "UK"
+        and (row["domain"], row["market"], row["company_name"]) not in contacted
+    ][:UK_LIMIT]
+
+    dach_selected = [
+        {**row, "batch_number": next_batch_number, "batch_month": batch_month}
+        for row in candidates
+        if row["market"] in DACH_MARKETS
+        and (row["domain"], row["market"], row["company_name"]) not in contacted
+    ][:DACH_LIMIT]
+
+    selected = uk_selected + dach_selected
 
     if not selected:
         logger.info("monthly_batch: no new candidates to select")
-        return {"status": "ok", "selected": 0, "batch_number": next_batch_number, "batch_month": batch_month}
+        return {
+            "status": "ok", "selected": 0,
+            "uk_selected": 0, "dach_selected": 0,
+            "batch_number": next_batch_number, "batch_month": batch_month,
+        }
 
     for i in range(0, len(selected), 100):
         sb.table("campaign_batches").insert(selected[i : i + 100]).execute()
 
     logger.info(
-        "monthly_batch: inserted %d companies as batch #%d (%s)",
-        len(selected), next_batch_number, batch_month,
+        "monthly_batch: inserted %d companies as batch #%d (%s) — UK=%d DACH=%d",
+        len(selected), next_batch_number, batch_month, len(uk_selected), len(dach_selected),
     )
     return {
-        "status":       "ok",
-        "selected":     len(selected),
-        "batch_number": next_batch_number,
-        "batch_month":  batch_month,
+        "status":        "ok",
+        "selected":      len(selected),
+        "uk_selected":   len(uk_selected),
+        "dach_selected": len(dach_selected),
+        "batch_number":  next_batch_number,
+        "batch_month":   batch_month,
     }
 
 
@@ -108,8 +127,9 @@ async def push_batch_to_clay(batch_number: int) -> dict:
                 logger.warning("monthly_batch: %s not configured — skipping %d companies", webhook_key, len(companies))
                 results[webhook_key] = {"status": "skipped", "reason": "no_webhook_configured", "companies": len(companies)}
                 return
-            resp = await client.post(webhook_url, json=companies)
-            resp.raise_for_status()
+            for company in companies:
+                resp = await client.post(webhook_url, json=company)
+                resp.raise_for_status()
             logger.info("monthly_batch: pushed %d companies via %s", len(companies), webhook_key)
             results[webhook_key] = {"status": "ok", "companies": len(companies)}
 
