@@ -161,3 +161,22 @@ async def monthly_batch():
 async def monthly_batch_push(batch_number: int):
     """Pushes a campaign batch to Clay webhooks, grouped by market."""
     return await push_batch_to_clay(batch_number)
+
+
+@router.post("/pipelines/run-monthly")
+async def run_monthly():
+    """1st-of-month cron: select campaign batch then run dbt tests."""
+    from pipelines.dbt_runner import run_dbt_tests
+    from utils.slack import notify
+    try:
+        batch_result = await run_monthly_batch()
+        dbt_result = run_dbt_tests()
+        dbt_status = "✅ passed" if dbt_result["passed"] else "❌ failed"
+        await notify(
+            f"✅ *Monthly batch* — batch #{batch_result['batch_number']}, "
+            f"UK={batch_result['uk_selected']} DACH={batch_result['dach_selected']}, dbt {dbt_status}"
+        )
+        return {"batch": batch_result, "dbt": dbt_result}
+    except Exception as exc:
+        await notify(f"❌ *Monthly batch failed* — `{exc}`", success=False)
+        raise

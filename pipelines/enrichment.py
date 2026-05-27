@@ -318,6 +318,82 @@ async def run_prioritize() -> dict:
     return {"status": "ok", "prioritized": len(rows)}
 
 
+# ── Step 5c: poll all pending batches ────────────────────────────────────────
+
+async def process_all_pending() -> dict:
+    """
+    Polls all pending enrichment batches.
+    If any are still processing, returns still_pending count.
+    Once all complete, runs prioritize then dbt tests.
+    """
+    from pipelines.dbt_runner import run_dbt_tests
+    from utils.slack import notify
+
+    try:
+        sb = get_supabase()
+
+        pending = (
+            sb.table("enrichment_batches")
+            .select("batch_id")
+            .eq("status", "pending")
+            .execute()
+            .data
+        )
+
+        if not pending:
+            return {
+                "status": "ok",
+                "message": "no_pending_batches",
+                "processed": 0,
+                "still_pending": 0,
+                "prioritize": None,
+                "dbt": None,
+            }
+
+        still_pending = 0
+        total_enriched = 0
+
+        for row in pending:
+            result = await process_results(row["batch_id"])
+            if result["status"] == "pending":
+                still_pending += 1
+            else:
+                total_enriched += result.get("enriched", 0)
+
+        if still_pending > 0:
+            return {
+                "status":         "ok",
+                "processed":      len(pending) - still_pending,
+                "still_pending":  still_pending,
+                "total_enriched": total_enriched,
+                "prioritize":     None,
+                "dbt":            None,
+            }
+
+        # All batches done — run prioritize then dbt
+        prioritize_result = await run_prioritize()
+        dbt_result = run_dbt_tests()
+
+        dbt_status = "✅ passed" if dbt_result["passed"] else "❌ failed"
+        await notify(
+            f"✅ *Enrichment complete* — enriched {total_enriched} companies, "
+            f"prioritized {prioritize_result['prioritized']}, dbt {dbt_status}"
+        )
+
+        return {
+            "status":         "ok",
+            "processed":      len(pending),
+            "still_pending":  0,
+            "total_enriched": total_enriched,
+            "prioritize":     prioritize_result,
+            "dbt":            dbt_result,
+        }
+
+    except Exception as exc:
+        await notify(f"❌ *Enrich poller failed* — `{exc}`", success=False)
+        raise
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/pipelines/enrich")
@@ -330,6 +406,12 @@ async def enrich():
 async def enrich_complete(batch_id: str):
     """Processes results for a completed batch. Returns pending if not done yet."""
     return await process_results(batch_id)
+
+
+@router.post("/pipelines/enrich-complete-all")
+async def enrich_complete_all():
+    """Polls all pending batches. Runs prioritize + dbt once all are done."""
+    return await process_all_pending()
 
 
 @router.post("/pipelines/prioritize")

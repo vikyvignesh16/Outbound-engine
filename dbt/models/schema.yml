@@ -1,0 +1,55 @@
+version: 2
+
+sources:
+  - name: public
+    schema: public
+    tables:
+
+      - name: sourced_tam_v2
+        columns:
+          - name: domain
+            tests: [not_null]
+          - name: market
+            tests: [not_null]
+          - name: company_name
+            tests: [not_null]
+
+      - name: qualified_tam_v2
+        columns:
+          - name: domain
+            tests: [not_null]
+          - name: market
+            tests: [not_null]
+          - name: company_name
+            tests: [not_null]
+          - name: account_fit_score
+            tests:
+              - accepted_values:
+                  values: [1, 2, 3, 4, 5]
+                  quote: false
+                  config:
+                    where: "account_fit_score is not null"
+
+      - name: priority_tam
+        columns:
+          - name: domain
+            tests: [not_null]
+          - name: market
+            tests: [not_null]
+          - name: company_name
+            tests: [not_null]
+          - name: account_fit_score
+            tests: [not_null]
+
+      - name: campaign_batches
+        columns:
+          - name: domain
+            tests: [not_null]
+          - name: market
+            tests: [not_null]
+          - name: company_name
+            tests: [not_null]
+          - name: batch_number
+            tests: [not_null]
+          - name: batch_month
+            tests: [not_null]

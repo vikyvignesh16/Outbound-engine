@@ -1,0 +1,6 @@
+name: brevo_abm
+version: '1.0.0'
+config-version: 2
+profile: brevo_abm
+model-paths: ["models"]
+test-paths: ["models"]
