@@ -66,6 +66,12 @@ following:
            fragmented data, personalisation at scale)
          · A highly active online community or membership model that
            drives significant recurring communications
+         · A subscription-based business model (meal kits, subscription
+           boxes, SaaS with consumer users, membership clubs, ticketed
+           recurring events) — these inherently require sophisticated
+           lifecycle email: welcome sequences, churn prevention, renewal
+           reminders, and reactivation flows, making them a strong
+           Brevo use case regardless of headcount
        Size alone should not disqualify a company if these signals
        are strong — a 50-person company with a loyalty programme and
        active newsletter is a better Brevo fit than a 200-person
