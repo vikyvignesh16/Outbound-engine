@@ -142,6 +142,7 @@ async def submit_enrichment() -> dict:
         sb.table("qualified_tam_v2")
         .select("domain, market, company_name")
         .is_("account_fit_score", "null")
+        .limit(100000)
         .execute()
         .data
     )
@@ -302,6 +303,7 @@ async def run_prioritize() -> dict:
             "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp"
         )
         .gte("account_fit_score", 3)
+        .limit(100000)
         .execute()
         .data
     )

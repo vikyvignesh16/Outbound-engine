@@ -102,6 +102,7 @@ async def run_crm_check() -> dict:
     rows = (
         sb.table("sourced_tam_v2")
         .select("domain, market")
+        .limit(100000)
         .execute()
         .data
     )
@@ -177,6 +178,7 @@ async def run_qualification_rules() -> dict:
             "location, country, linkedin_url, vertical, "
             "brevo_company_id, planhat_id, open_deals, deal_lost_date"
         )
+        .limit(100000)
         .execute()
         .data
     )
@@ -261,6 +263,7 @@ async def run_technographic() -> dict:
         sb.table("qualified_tam_v2")
         .select("domain, market")
         .is_("esp_score", "null")
+        .limit(100000)
         .execute()
         .data
     )
