@@ -28,9 +28,8 @@ def build_prompt(company_name: str, domain: str) -> str:
 automation platform used by B2B and B2C companies to manage email,
 SMS, and multi-channel marketing campaigns.
 
-Brevo is targeting enterprise and mid-market companies (500+
-employees) that run high-volume email and CRM campaigns as part of
-their ABM and outbound motion.
+Brevo targets companies with 100+ employees that communicate with
+customers or users through email, SMS, or CRM workflows.
 
 Research the company {company_name} ({domain}) and answer the
 following:
@@ -39,17 +38,28 @@ following:
 
 2. How many employees do they have approximately?
 
-3. Do they likely send marketing emails or run CRM campaigns?
-   (look for signs like a newsletter, promotional emails, loyalty
-   programs, or customer communications)
+3. Do they likely send emails or manage customer communications?
+   Describe what you observe — this is for context only, not scoring.
+   Look for any of the following:
+   - Marketing newsletters or promotional campaigns
+   - Transactional emails (order confirmations, receipts, alerts)
+   - Customer onboarding or lifecycle sequences
+   - Loyalty or rewards programme communications
+   - SMS or multi-channel customer messaging
+   - B2B outreach or nurture sequences
 
 4. Are they a good fit for Brevo? Score them 1-5 where:
-   - 5 = Strong fit (500+ employees, runs high-volume email or CRM
-       campaigns, clear marketing activity at scale)
-   - 3 = Possible fit (some email/CRM activity but scale or need
-       is unclear)
-   - 1 = Poor fit (no marketing activity, too small, or no signs
-       of email/CRM usage)
+   - 5 = Strong fit — 100+ employees, clear ICP match (retail,
+       e-commerce, hospitality, financial services, SaaS, or any
+       company with a significant customer communication layer)
+   - 4 = Good fit — 100+ employees, likely sends emails or manages
+       customer relationships but ICP match is slightly less clear
+   - 3 = Possible fit — near the 100 employee threshold or ICP fit
+       is uncertain but there are positive signals
+   - 2 = Weak fit — fewer than 100 employees or very limited
+       observable customer communication activity
+   - 1 = Poor fit — under 50 employees, purely B2B services with
+       no end-customer communication layer, or no digital presence
 
 5. Does the company have a digital wallet or payment wallet product?
    (look for signs like a branded wallet, stored value card, prepaid
@@ -73,8 +83,8 @@ observe from their website, job postings, or public sources. If you
 cannot verify something, say "unknown" for text fields and false for
 boolean fields.
 
-Return your answer in this exact JSON format with no preamble, no markdown
-code fences, and no text outside it:
+Return your answer in this exact JSON format with no preamble, no
+markdown code fences, and no text outside it:
 
 {{
   "response": {{
