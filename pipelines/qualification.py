@@ -6,7 +6,7 @@ import os
 import httpx
 from fastapi import APIRouter
 
-from db.client import get_supabase, get_pg
+from db.client import get_supabase, fetch_all
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -98,12 +98,7 @@ async def run_crm_check() -> dict:
     deal_lost_date, planhat_id). Domains not found in CRM get null for all four.
     """
     sb = get_supabase()
-    pg = await get_pg()
-    try:
-        records = await pg.fetch("SELECT domain, market FROM sourced_tam_v2")
-        rows = [dict(r) for r in records]
-    finally:
-        await pg.close()
+    rows = fetch_all("sourced_tam_v2", "domain, market")
 
     if not rows:
         logger.info("crm_check: no rows to process")
@@ -168,17 +163,12 @@ async def run_qualification_rules() -> dict:
     and upserts qualifying rows into qualified_tam_v2.
     """
     sb = get_supabase()
-    pg = await get_pg()
-    try:
-        records = await pg.fetch(
-            "SELECT id, domain, market, company_name, company_type, employee_range, "
-            "location, country, linkedin_url, vertical, "
-            "brevo_company_id, planhat_id, open_deals, deal_lost_date "
-            "FROM sourced_tam_v2"
-        )
-        rows = [dict(r) for r in records]
-    finally:
-        await pg.close()
+    rows = fetch_all(
+        "sourced_tam_v2",
+        "id, domain, market, company_name, company_type, employee_range, "
+        "location, country, linkedin_url, vertical, "
+        "brevo_company_id, planhat_id, open_deals, deal_lost_date",
+    )
 
     qualified_rows = []
     disqualified = 0
@@ -255,14 +245,7 @@ async def run_technographic() -> dict:
     calls Technographic API per domain, and writes esp_detected + esp_score back.
     """
     sb = get_supabase()
-    pg = await get_pg()
-    try:
-        records = await pg.fetch(
-            "SELECT domain, market FROM qualified_tam_v2 WHERE esp_score IS NULL"
-        )
-        rows = [dict(r) for r in records]
-    finally:
-        await pg.close()
+    rows = fetch_all("qualified_tam_v2", "domain, market", [("is_", "esp_score", "null")])
 
     if not rows:
         logger.info("technographic: no rows to process")

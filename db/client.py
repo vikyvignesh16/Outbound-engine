@@ -1,7 +1,4 @@
-import ssl
-import urllib.parse
 from supabase import create_client, Client
-import asyncpg
 import os
 
 _supabase: Client | None = None
@@ -18,16 +15,21 @@ def get_supabase() -> Client:
 # Convenience alias used across the codebase
 supabase = get_supabase
 
-async def get_pg():
-    parsed = urllib.parse.urlparse(os.environ["SUPABASE_DB_URL"])
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return await asyncpg.connect(
-        host=parsed.hostname,
-        port=parsed.port or 5432,
-        user=parsed.username,
-        password=urllib.parse.unquote(parsed.password or ""),
-        database=parsed.path.lstrip("/"),
-        ssl=ctx,
-    )
+
+def fetch_all(table: str, select: str, filters: list | None = None) -> list[dict]:
+    """Paginate through all rows in a table using supabase-py .range()."""
+    sb = get_supabase()
+    all_rows: list[dict] = []
+    page_size = 1000
+    offset = 0
+    while True:
+        query = sb.table(table).select(select).range(offset, offset + page_size - 1)
+        if filters:
+            for method, *args in filters:
+                query = getattr(query, method)(*args)
+        batch = query.execute().data
+        all_rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return all_rows
