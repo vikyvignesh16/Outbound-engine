@@ -173,7 +173,7 @@ async def run_qualification_rules() -> dict:
     rows = (
         sb.table("sourced_tam_v2")
         .select(
-            "domain, market, company_name, company_type, employee_range, "
+            "id, domain, market, company_name, company_type, employee_range, "
             "location, country, linkedin_url, vertical, "
             "brevo_company_id, planhat_id, open_deals, deal_lost_date"
         )
@@ -205,13 +205,21 @@ async def run_qualification_rules() -> dict:
         else:
             disqualified += 1
 
-    if qualified_rows:
-        for i in range(0, len(qualified_rows), 100):
-            chunk = qualified_rows[i : i + 100]
+    # keep only the highest-id row per (domain, market) — qualified_tam_v2 is unique on that pair
+    best: dict[tuple, dict] = {}
+    for r in qualified_rows:
+        key = (r["domain"], r["market"])
+        if key not in best or r["id"] > best[key]["id"]:
+            best[key] = r
+    deduped = list(best.values())
+
+    if deduped:
+        for i in range(0, len(deduped), 100):
+            chunk = deduped[i : i + 100]
             sb.table("qualified_tam_v2").upsert(chunk, on_conflict="domain,market").execute()
 
-    logger.info("qualification_rules: qualified=%d disqualified=%d", len(qualified_rows), disqualified)
-    return {"status": "ok", "qualified": len(qualified_rows), "disqualified": disqualified}
+    logger.info("qualification_rules: qualified=%d deduped=%d disqualified=%d", len(qualified_rows), len(deduped), disqualified)
+    return {"status": "ok", "qualified": len(deduped), "disqualified": disqualified}
 
 
 # ── Technographic API call ────────────────────────────────────────────────────
