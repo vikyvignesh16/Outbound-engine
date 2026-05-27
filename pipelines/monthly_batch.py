@@ -173,7 +173,11 @@ async def monthly_batch():
 @router.post("/pipelines/monthly-batch/push")
 async def monthly_batch_push(batch_number: int):
     """Pushes a campaign batch to Clay webhooks, grouped by market."""
-    return await push_batch_to_clay(batch_number)
+    try:
+        return await push_batch_to_clay(batch_number)
+    except Exception as exc:
+        logger.exception("monthly_batch_push: failed for batch %d", batch_number)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/pipelines/run-monthly")
