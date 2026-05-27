@@ -172,7 +172,11 @@ async def run_qualification_rules() -> dict:
 
     rows = (
         sb.table("sourced_tam_v2")
-        .select("domain, market, company_name, brevo_company_id, planhat_id, open_deals, deal_lost_date, vertical")
+        .select(
+            "domain, market, company_name, company_type, employee_range, "
+            "location, country, linkedin_url, vertical, "
+            "brevo_company_id, planhat_id, open_deals, deal_lost_date"
+        )
         .execute()
         .data
     )
@@ -187,11 +191,16 @@ async def run_qualification_rules() -> dict:
                 "domain":            row["domain"],
                 "market":            row["market"],
                 "company_name":      row.get("company_name"),
+                "company_type":      row.get("company_type"),
+                "employee_range":    row.get("employee_range"),
+                "location":          row.get("location"),
+                "country":           row.get("country"),
+                "linkedin_url":      row.get("linkedin_url"),
+                "vertical":          row.get("vertical"),
                 "brevo_company_id":  row.get("brevo_company_id"),
                 "planhat_id":        row.get("planhat_id"),
                 "open_deals":        row.get("open_deals"),
                 "deal_lost_date":    row.get("deal_lost_date"),
-                "vertical":          row.get("vertical"),
             })
         else:
             disqualified += 1

@@ -44,7 +44,13 @@ async def run_monthly_batch() -> dict:
 
     candidates = (
         sb.table("priority_tam")
-        .select("domain, market, company_name, account_fit_score, vertical")
+        .select(
+            "domain, market, company_name, company_type, employee_range, "
+            "location, country, linkedin_url, vertical, "
+            "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
+            "esp_detected, esp_score, account_fit_score, account_narrative, "
+            "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp"
+        )
         .order("account_fit_score", desc=True)
         .order("prioritized_at", desc=False)
         .execute()
@@ -104,7 +110,14 @@ async def push_batch_to_clay(batch_number: int) -> dict:
 
     rows = (
         sb.table("campaign_batches")
-        .select("domain, market, company_name, account_fit_score, vertical, batch_month")
+        .select(
+            "domain, market, company_name, company_type, employee_range, "
+            "location, country, linkedin_url, vertical, "
+            "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
+            "esp_detected, esp_score, account_fit_score, account_narrative, "
+            "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp, "
+            "batch_month"
+        )
         .eq("batch_number", batch_number)
         .execute()
         .data

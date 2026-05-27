@@ -295,10 +295,11 @@ async def run_prioritize() -> dict:
     rows = (
         sb.table("qualified_tam_v2")
         .select(
-            "domain, market, company_name, brevo_company_id, planhat_id, "
-            "open_deals, deal_lost_date, vertical, esp_detected, esp_score, "
-            "account_fit_score, account_narrative, email_crm_activity, "
-            "has_wallet, has_loyalty_program, needs_cdp"
+            "domain, market, company_name, company_type, employee_range, "
+            "location, country, linkedin_url, vertical, "
+            "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
+            "esp_detected, esp_score, account_fit_score, account_narrative, "
+            "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp"
         )
         .gte("account_fit_score", 3)
         .execute()
