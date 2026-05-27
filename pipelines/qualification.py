@@ -93,15 +93,22 @@ async def get_brevo_company(domain: str, client: httpx.AsyncClient) -> dict | No
 
 async def run_crm_check() -> dict:
     """
-    Reads all rows from sourced_tam_v2, calls Brevo CRM API once per domain,
-    and writes all four CRM fields back (brevo_company_id, open_deals,
-    deal_lost_date, planhat_id). Domains not found in CRM get null for all four.
+    Fetches up to 1000 unchecked rows per market from sourced_tam_v2,
+    calls Brevo CRM API per domain, writes CRM fields back, and marks
+    crm_checked=true. Runs daily — full TAM covered in ~15 days.
     """
     sb = get_supabase()
-    rows = fetch_all("sourced_tam_v2", "domain, market")
+    rows = []
+    for market in ["UK", "Ireland"]:
+        batch = fetch_all(
+            "sourced_tam_v2", "domain, market",
+            [("eq", "market", market), ("eq", "crm_checked", False)],
+            limit=1000,
+        )
+        rows.extend(batch)
 
     if not rows:
-        logger.info("crm_check: no rows to process")
+        logger.info("crm_check: no unchecked rows remaining")
         return {"status": "ok", "processed": 0}
 
     logger.info("crm_check: processing %d domains", len(rows))
@@ -111,7 +118,7 @@ async def run_crm_check() -> dict:
         domain = row["domain"]
         async with semaphore:
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(http2=False) as client:
                     crm = await get_brevo_company(domain, client)
                 update_payload = crm if crm else {
                     "brevo_company_id": None,
@@ -119,6 +126,7 @@ async def run_crm_check() -> dict:
                     "deal_lost_date":   None,
                     "planhat_id":       None,
                 }
+                update_payload["crm_checked"] = True
                 sb.table("sourced_tam_v2").update(update_payload).eq("domain", domain).eq("market", row["market"]).execute()
             except Exception as exc:
                 logger.error("crm_check: failed for %s: %s", domain, exc)
@@ -168,6 +176,7 @@ async def run_qualification_rules() -> dict:
         "id, domain, market, company_name, company_type, employee_range, "
         "location, country, linkedin_url, vertical, "
         "brevo_company_id, planhat_id, open_deals, deal_lost_date",
+        [("eq", "crm_checked", True)],
     )
 
     qualified_rows = []

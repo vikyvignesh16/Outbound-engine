@@ -16,20 +16,22 @@ def get_supabase() -> Client:
 supabase = get_supabase
 
 
-def fetch_all(table: str, select: str, filters: list | None = None) -> list[dict]:
-    """Paginate through all rows in a table using supabase-py .range()."""
+def fetch_all(table: str, select: str, filters: list | None = None, limit: int | None = None) -> list[dict]:
+    """Paginate through rows in a table using supabase-py .range(). Pass limit to cap total rows."""
     sb = get_supabase()
     all_rows: list[dict] = []
     page_size = 1000
     offset = 0
     while True:
-        query = sb.table(table).select(select).range(offset, offset + page_size - 1)
+        remaining = (limit - len(all_rows)) if limit else page_size
+        batch_size = min(page_size, remaining)
+        query = sb.table(table).select(select).range(offset, offset + batch_size - 1)
         if filters:
             for method, *args in filters:
                 query = getattr(query, method)(*args)
         batch = query.execute().data
         all_rows.extend(batch)
-        if len(batch) < page_size:
+        if len(batch) < batch_size or (limit and len(all_rows) >= limit):
             break
-        offset += page_size
+        offset += batch_size
     return all_rows
