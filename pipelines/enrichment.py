@@ -140,22 +140,24 @@ _BATCH_SIZE = 500
 
 # ── Step 5a: submit batch ─────────────────────────────────────────────────────
 
-async def submit_enrichment() -> dict:
+async def submit_enrichment(limit: int | None = None) -> dict:
     """
     Reads qualified_tam_v2 rows with no account_fit_score, chunks them into
     batches of 500, submits all chunks in parallel to the Claude Batch API,
-    and returns all batch IDs.
+    and returns all batch IDs. Pass limit to submit a sample batch only.
     """
     sb = get_supabase()
 
-    rows = (
+    query = (
         sb.table("qualified_tam_v2")
         .select("domain, market, company_name")
         .is_("account_fit_score", "null")
-        .limit(100000)
-        .execute()
-        .data
     )
+    if limit:
+        query = query.limit(limit)
+    else:
+        query = query.limit(100000)
+    rows = query.execute().data
 
     if not rows:
         logger.info("enrichment: no rows to enrich")
@@ -409,9 +411,9 @@ async def process_all_pending() -> dict:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/pipelines/enrich")
-async def enrich():
-    """Submits qualified_tam_v2 rows to Claude Batch API. Returns batch_ids."""
-    return await submit_enrichment()
+async def enrich(limit: int | None = None):
+    """Submits qualified_tam_v2 rows to Claude Batch API. Pass ?limit=100 for a sample run."""
+    return await submit_enrichment(limit=limit)
 
 
 @router.post("/pipelines/enrich/complete")
