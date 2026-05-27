@@ -34,8 +34,6 @@ class ClayTAMRow(BaseModel):
     linkedin_url: Optional[str] = Field(None, alias="LinkedIn URL")
     domain: str                 = Field(alias="Domain")
     vertical: Optional[str]     = Field(None, alias="Primary Industry")
-    clay_id: Optional[str]      = Field(None, alias="ID")
-
     def market(self) -> str:
         return COUNTRY_TO_MARKET.get((self.country or "").lower(), self.country or "UNKNOWN")
 

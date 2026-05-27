@@ -2,11 +2,13 @@ import hmac
 import hashlib
 import os
 import logging
+from collections import Counter
 
 from fastapi import APIRouter, Request, Header, HTTPException
 from pydantic import ValidationError
 from db.client import get_supabase
 from db.models import ClayTAMRow, ClayTAMPayload
+from utils.slack import notify
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -34,7 +36,6 @@ def _transform_row(row: ClayTAMRow) -> dict:
         "country":        row.country,
         "linkedin_url":   row.linkedin_url,
         "vertical":       row.vertical,
-        "clay_id":        row.clay_id,
         "raw":            row.model_dump(by_alias=True),
     }
 
@@ -63,5 +64,12 @@ async def receive_clay_tam(
 
     rows = [_transform_row(r) for r in payload.root]
     _upsert_in_chunks(rows)
+
+    try:
+        market_counts = Counter(r["market"] for r in rows)
+        breakdown = ", ".join(f"{m}: {c}" for m, c in sorted(market_counts.items()))
+        await notify(f"📥 *sourced_tam updated* — {len(rows)} rows upserted ({breakdown})")
+    except Exception:
+        pass
 
     return {"status": "ok", "accepted": len(rows)}
