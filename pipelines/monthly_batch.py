@@ -116,13 +116,18 @@ async def push_batch_to_clay(batch_number: int) -> dict:
         by_webhook.setdefault(key, []).append(row)
 
     results = {}
-    semaphore = asyncio.Semaphore(10)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         async def push_one(webhook_url: str, company: dict) -> None:
-            async with semaphore:
+            for attempt, wait in enumerate([0, 2, 5]):
+                if wait:
+                    await asyncio.sleep(wait)
                 resp = await client.post(webhook_url, json=company)
+                if resp.status_code == 429 and attempt < 2:
+                    logger.warning("monthly_batch: 429 from Clay, retrying (attempt %d)", attempt + 1)
+                    continue
                 resp.raise_for_status()
+                return
 
         async def push_group(webhook_key: str, companies: list) -> None:
             webhook_url = os.environ.get(webhook_key)
@@ -130,7 +135,8 @@ async def push_batch_to_clay(batch_number: int) -> dict:
                 logger.warning("monthly_batch: %s not configured — skipping %d companies", webhook_key, len(companies))
                 results[webhook_key] = {"status": "skipped", "reason": "no_webhook_configured", "companies": len(companies)}
                 return
-            await asyncio.gather(*[push_one(webhook_url, c) for c in companies])
+            for company in companies:
+                await push_one(webhook_url, company)
             logger.info("monthly_batch: pushed %d companies via %s", len(companies), webhook_key)
             results[webhook_key] = {"status": "ok", "companies": len(companies)}
 
