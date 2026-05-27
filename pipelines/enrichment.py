@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import anthropic
 from fastapi import APIRouter
 
-from db.client import get_supabase
+from db.client import get_supabase, fetch_all
 
 _BATCH_INPUT_COST_PER_TOKEN  = 1.50 / 1_000_000
 _BATCH_OUTPUT_COST_PER_TOKEN = 7.50 / 1_000_000
@@ -148,16 +148,21 @@ async def submit_enrichment(limit: int | None = None) -> dict:
     """
     sb = get_supabase()
 
-    query = (
-        sb.table("qualified_tam_v2")
-        .select("domain, market, company_name")
-        .is_("account_fit_score", "null")
-    )
     if limit:
-        query = query.limit(limit)
+        rows = (
+            sb.table("qualified_tam_v2")
+            .select("domain, market, company_name")
+            .is_("account_fit_score", "null")
+            .limit(limit)
+            .execute()
+            .data
+        )
     else:
-        query = query.limit(100000)
-    rows = query.execute().data
+        rows = fetch_all(
+            "qualified_tam_v2",
+            "domain, market, company_name",
+            [("is_", "account_fit_score", "null")],
+        )
 
     if not rows:
         logger.info("enrichment: no rows to enrich")
