@@ -123,15 +123,16 @@ async def push_batch_to_clay(batch_number: int) -> dict:
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         async def push_one(webhook_url: str, company: dict) -> None:
-            for attempt, wait in enumerate([0, 2, 5]):
-                if wait:
-                    await asyncio.sleep(wait)
+            for attempt in range(5):
                 resp = await client.post(webhook_url, json=company)
-                if resp.status_code == 429 and attempt < 2:
-                    logger.warning("monthly_batch: 429 from Clay, retrying (attempt %d)", attempt + 1)
+                if resp.status_code == 429:
+                    wait = int(resp.headers.get("Retry-After", 10 * (2 ** attempt)))
+                    logger.warning("monthly_batch: 429 from Clay, waiting %ds (attempt %d)", wait, attempt + 1)
+                    await asyncio.sleep(wait)
                     continue
                 resp.raise_for_status()
                 return
+            raise RuntimeError("monthly_batch: Clay 429 — max retries exceeded")
 
         async def push_group(webhook_key: str, companies: list) -> None:
             webhook_url = os.environ.get(webhook_key)
