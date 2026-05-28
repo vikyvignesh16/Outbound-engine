@@ -75,6 +75,10 @@ and company — not like a mass email sequence.
   serves as the anchor text for {{cta_book_call}}
   Write it as a natural sentence that makes clicking
   feel like the obvious next step
+- Never generate or include URLs in any content —
+  {{cta_book_call}}, {{case_study_url}}, and {{report_url}}
+  are Lemlist template variables set at campaign level;
+  only write the anchor text that wraps around them
 
 ---
 
