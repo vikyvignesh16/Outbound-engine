@@ -31,15 +31,6 @@ async def _run_daily_bg() -> None:
             "daily_runner: complete — crm=%d qualified=%d enrich=%d content=%d",
             crm["processed"], rules["qualified"], enrich["submitted"], content["submitted"],
         )
-    except NotImplementedError:
-        # Content prompt not yet defined — skip without failing the daily run
-        await notify(
-            f"✅ *Daily pipeline complete* (content pending prompt)\n"
-            f"• CRM checked: {crm['processed']} companies\n"
-            f"• Qualified: {rules['qualified']} companies\n"
-            f"• Technographic: {tech['processed']} companies\n"
-            f"• Submitted to enrichment: {enrich['submitted']} ({enrich['batches']} batches)"
-        )
     except Exception as exc:
         await notify(f"❌ *Daily pipeline failed* — `{exc}`", success=False)
         logger.exception("daily_runner: failed")
