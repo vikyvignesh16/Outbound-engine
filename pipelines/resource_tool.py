@@ -1,76 +1,255 @@
 """
 Brevo resource catalogue for outbound content generation.
 
-Each resource is a case study, report, or ebook that Claude selects from
-when generating outbound sequence content. Claude receives all resources
-and picks the most relevant one based on the contact's vertical and signals.
-
-To add a resource, append a dict to RESOURCES following the schema below.
+Claude receives all resources via the search_brevo_resources tool and selects
+the single most relevant one per contact based on vertical and signals.
 """
 
 from typing import Any
 
-# ── Resource catalogue ────────────────────────────────────────────────────────
-# ⚠️ Replace placeholders with real Brevo resources before going live.
-
 RESOURCES: list[dict[str, Any]] = [
+    # ── Case studies — Wallet / Loyalty ───────────────────────────────────────
     {
-        "id":                   "buffalo-grill-case-study",
+        "id":                   "buffalo-grill-repeat-visits",
         "company":              "Buffalo Grill",
-        "title":                "How Buffalo Grill activated 500,000 loyalty members in 6 months",
-        "type":                 "case_study",           # case_study | report | ebook | guide | benchmark
+        "title":                "Buffalo Grill achieves 47% repeat restaurant visits",
+        "type":                 "case_study",
         "industry":             "hospitality",
-        "url":                  "https://www.brevo.com/customers/buffalo-grill/",
-        "key_metrics":          "500,000 loyalty cards activated in 6 months, 92% retention rate, 75% of signups in-venue via QR code",
-        "context":              "Buffalo Grill is a French restaurant chain that needed to unify its loyalty programme with CRM and email marketing. Previously, their loyalty data and email platform were siloed, making personalised communications across 300+ venues extremely difficult.",
-        "pain_points":          "Disconnected loyalty and email systems, no unified customer profile, difficulty personalising at scale across multiple venues",
-        "brevo_features_tags":  ["loyalty", "email", "CRM", "wallet", "QR"],
-        "best_for_verticals":   ["hospitality", "restaurants", "food_beverage", "retail"],
+        "url":                  "https://www.brevo.com/resources/success-story-buffalo-grill/",
+        "key_metrics":          "500,000 new loyalty members in 6 months; 47% increase in repeat restaurant visits; 56 additional visits per restaurant per month on average",
+        "context":              "Buffalo Grill, a French restaurant chain with 350+ locations, launched Buffalo Pass — a fully digital loyalty programme powered by Brevo Wallet. Frictionless QR-based enrollment with instant Apple and Google Wallet integration required no app download. Progressive rewards (renewed every 3 visits) and targeted push notifications drove 500,000 signups in six months and 56 additional visits per restaurant monthly.",
+        "pain_points":          "Driving repeat visits across a large restaurant network; staying top of mind amid dining alternatives; limited visibility into customer behaviour between visits",
+        "brevo_features_tags":  ["wallet", "loyalty", "push_notifications", "segmentation", "QR"],
+        "best_for_verticals":   ["hospitality", "restaurants", "food_beverage", "leisure"],
         "best_for_signals":     ["has_loyalty_program", "has_wallet"],
     },
     {
-        "id":                   "placeholder-report-1",
-        # ⚠️ PLACEHOLDER — replace with a real Brevo report
-        "company":              "Brevo",
-        "title":                "The 2026 Marketing Automation Benchmark Report",
-        "type":                 "report",
-        "industry":             "cross-vertical",
-        "url":                  "https://www.brevo.com/resources/placeholder-report/",
-        "key_metrics":          "Replace with 1-2 headline stats from the report",
-        "context":              "Replace with a 1-2 sentence summary of what the report covers and why it matters",
-        "pain_points":          "Replace with the core pain points this report addresses",
-        "brevo_features_tags":  ["email", "automation", "CRM"],
-        "best_for_verticals":   ["saas", "ecommerce", "retail", "fintech"],
+        "id":                   "jacadi-mobile-wallet",
+        "company":              "Jacadi",
+        "title":                "Jacadi boosts purchase frequency by 39% with mobile wallet",
+        "type":                 "case_study",
+        "industry":             "retail",
+        "url":                  "https://www.brevo.com/resources/jacadi-case-study/",
+        "key_metrics":          "39% increase in purchase frequency (walletised vs non-walletised customers); 23% revenue increase; 97% wallet card retention on customers' phones",
+        "context":              "Jacadi, a fashion retailer, digitised its paperless loyalty programme across Apple Wallet and Google Wallet using Brevo. Automated personalised push notifications, real-time loyalty data updates, and retention campaigns including loyalty expiration alerts drove measurable revenue impact. Walletised customers bought 39% more frequently and generated 23% more revenue.",
+        "pain_points":          "Need to digitise loyalty without physical cards; difficulty making paperless loyalty feel premium; challenge to increase purchase frequency and average order value",
+        "brevo_features_tags":  ["wallet", "loyalty", "push_notifications", "email"],
+        "best_for_verticals":   ["retail", "fashion", "ecommerce"],
+        "best_for_signals":     ["has_loyalty_program", "has_wallet"],
+    },
+    {
+        "id":                   "salomon-google-wallet",
+        "company":              "Salomon",
+        "title":                "Salomon drives 3x revenue growth with Google Wallet integration",
+        "type":                 "case_study",
+        "industry":             "sports_outdoor",
+        "url":                  "https://www.brevo.com/resources/salomon-success-story-google-wallet/",
+        "key_metrics":          "3x revenue growth; 54% increase in items per order; growth in visits, orders, and transactions",
+        "context":              "Salomon digitised its entire loyal customer journey with the Salomon Pass, a card saved directly to Google Wallet. Targeted push notifications for direct engagement and a modern mobile-first loyalty experience drove 3x revenue growth and a 54% increase in items per order in 2024.",
+        "pain_points":          "Creating a seamless loyalty programme that drives sales; transitioning from traditional card-based systems to mobile-first experiences",
+        "brevo_features_tags":  ["wallet", "google_wallet", "loyalty", "push_notifications"],
+        "best_for_verticals":   ["sports", "outdoor", "retail", "fashion"],
+        "best_for_signals":     ["has_loyalty_program", "has_wallet"],
+    },
+    {
+        "id":                   "loccitane-mobile-wallet",
+        "company":              "L'Occitane",
+        "title":                "L'Occitane increases average basket value by 25% with Mobile Wallet",
+        "type":                 "case_study",
+        "industry":             "beauty",
+        "url":                  "https://www.brevo.com/resources/success-story-loccitane/",
+        "key_metrics":          "25% increase in average basket value for walletised customers; 17.6% of customer base walletised in 1 year in the UK; 2x higher purchase frequency among walletised customers",
+        "context":              "L'Occitane UK implemented Brevo's Mobile Wallet to digitise their VIP card and deliver push notifications without requiring a separate app. Targeted offers reactivated dormant customers, and an omnichannel strategy combining VIP digitisation with personalised messaging resulted in 25% higher basket values and twice the purchase frequency among wallet users.",
+        "pain_points":          "Need to send push notifications without a dedicated app; low customer retention and repeat purchase rates; difficulty reactivating inactive customers",
+        "brevo_features_tags":  ["wallet", "loyalty", "push_notifications", "CRM"],
+        "best_for_verticals":   ["beauty", "cosmetics", "retail", "wellness"],
+        "best_for_signals":     ["has_loyalty_program", "has_wallet"],
+    },
+    {
+        "id":                   "the-kooples-mobile-wallet",
+        "company":              "The Kooples",
+        "title":                "The Kooples boosts turnover per customer by 89% with Mobile Wallet",
+        "type":                 "case_study",
+        "industry":             "fashion",
+        "url":                  "https://www.brevo.com/resources/success-story-the-kooples/",
+        "key_metrics":          "89% increase in turnover per walletised customer; 90% repeat purchase rate per walletised customer; 98% retention rate of cards in wallet",
+        "context":              "The Kooples implemented Brevo's Mobile Wallet to reach customer segments that were difficult to engage through traditional channels. Personalised push notifications complemented one-to-one communication and enabled efficient targeting, driving 89% higher revenue and a 90% repeat purchase rate per walletised customer.",
+        "pain_points":          "Difficulty reaching certain customer segments through traditional channels; need for more personalised communication at scale",
+        "brevo_features_tags":  ["wallet", "loyalty", "push_notifications", "CRM"],
+        "best_for_verticals":   ["fashion", "retail", "luxury"],
+        "best_for_signals":     ["has_loyalty_program", "has_wallet"],
+    },
+    {
+        "id":                   "cafe-kitsune-loyalty",
+        "company":              "Café Kitsuné",
+        "title":                "Café Kitsuné transforms visitors into loyal customers",
+        "type":                 "case_study",
+        "industry":             "food_beverage",
+        "url":                  "https://www.brevo.com/resources/cafe-kitsune-case-study/",
+        "key_metrics":          "96% of members loyal to the programme; 93% card retention rate; +20% increase in visits for cardholders; 98% registration completion rate",
+        "context":              "Café Kitsuné deployed Brevo's Mobile Wallet and Loyalty Platform to convert occasional visitors into regulars. An ultra-simplified QR registration process and a digital loyalty card with visual status progression (Latte, Matcha, Dark Coffee) drove a 20% visit increase and a 96% member loyalty rate.",
+        "pain_points":          "Converting occasional visitors into regular customers; managing physical loyalty cards; collecting qualified customer data efficiently",
+        "brevo_features_tags":  ["wallet", "loyalty", "push_notifications", "QR"],
+        "best_for_verticals":   ["food_beverage", "coffee", "hospitality", "restaurants"],
+        "best_for_signals":     ["has_loyalty_program", "has_wallet"],
+    },
+    # ── Case studies — CDP / Data ──────────────────────────────────────────────
+    {
+        "id":                   "oliviers-co-cdp",
+        "company":              "Oliviers & Co",
+        "title":                "Oliviers & Co centralises customer data and drives revenue with Brevo CDP",
+        "type":                 "case_study",
+        "industry":             "retail",
+        "url":                  "https://www.brevo.com/resources/oliviers-co-case-study/",
+        "key_metrics":          "+40% more actionable leads in France; +14% web revenue growth; +2% incremental revenue from reactivation; welcome emails achieving 60% open rate",
+        "context":              "Oliviers & Co, a multi-country retail company, unified fragmented customer data across France, US, and Norway using Brevo CDP. RFM scoring and purchase timing analysis created actionable segments. Four automated lifecycle scenarios — welcome, repurchase, abandoned cart, and reactivation — delivered 14% web revenue growth.",
+        "pain_points":          "Customer data scattered across multiple tools and channels; difficulty obtaining a unified customer view across countries; inability to create actionable segments from fragmented data",
+        "brevo_features_tags":  ["CDP", "email", "automation", "segmentation", "CRM"],
+        "best_for_verticals":   ["retail", "ecommerce", "food_beverage", "beauty"],
         "best_for_signals":     ["needs_cdp"],
     },
     {
-        "id":                   "placeholder-ebook-1",
-        # ⚠️ PLACEHOLDER — replace with a real Brevo ebook or guide
+        "id":                   "kfc-cdp",
+        "company":              "KFC",
+        "title":                "KFC optimises its data ecosystem with Brevo CDP",
+        "type":                 "case_study",
+        "industry":             "quick_service_restaurants",
+        "url":                  "https://www.brevo.com/resources/kfc-case-study-cdp/",
+        "key_metrics":          "Transformed fragmented data flow into an orchestrated pipeline; significantly reduced activation latency between customer events and CRM system",
+        "context":              "KFC France transformed its customer data ecosystem using Brevo CDP to unify fragmented data from digital, loyalty, and interaction touchpoints into a single actionable customer view. Reconciling data across channels via API and batch ingestion and reducing activation latency enabled faster, more reliable marketing operations at scale.",
+        "pain_points":          "Customer data scattered across multiple touchpoints; fragmented data flow causing loss of clear customer view; delayed information updates preventing timely activation",
+        "brevo_features_tags":  ["CDP", "CRM", "data_unification", "API"],
+        "best_for_verticals":   ["quick_service_restaurants", "hospitality", "food_beverage", "retail"],
+        "best_for_signals":     ["needs_cdp", "has_loyalty_program"],
+    },
+    {
+        "id":                   "monisnap-automation",
+        "company":              "Monisnap",
+        "title":                "Monisnap increases customer loyalty by 40% and triples transactions with Marketing Automation",
+        "type":                 "case_study",
+        "industry":             "fintech",
+        "url":                  "https://www.brevo.com/resources/success-story-monisnap/",
+        "key_metrics":          "40% increase in customer retention; 3x increase in money transfer transactions via email and SMS; 20+ automated marketing scenarios implemented",
+        "context":              "Monisnap, a European money transfer platform with 380,000+ users, achieved 40% higher retention and tripled transactions using Brevo's marketing automation. Customer scoring based on lifecycle history, transaction count, and behavioural intent enabled segmented flows across email, SMS, and retargeting in three languages.",
+        "pain_points":          "Encouraging recent clients to conduct repeat transactions; difficulty personalising communications across a large contact base; managing multi-channel campaigns at scale",
+        "brevo_features_tags":  ["email", "SMS", "automation", "segmentation", "CDP"],
+        "best_for_verticals":   ["fintech", "financial_services", "payments"],
+        "best_for_signals":     ["needs_cdp"],
+    },
+    # ── Case studies — Travel / Hospitality ───────────────────────────────────
+    {
+        "id":                   "kenya-airways-loyalty",
+        "company":              "Kenya Airways",
+        "title":                "Kenya Airways scales Asante Rewards by 70% in 10 months",
+        "type":                 "case_study",
+        "industry":             "aviation",
+        "url":                  "https://www.brevo.com/resources/kenya-airways-success-story/",
+        "key_metrics":          "+70% growth in Asante Rewards members in 10 months; 300,000–400,000 emails sent per month; thousands of new members onboarded every month",
+        "context":              "Kenya Airways scaled its Asante Rewards loyalty programme using Brevo's Email API integrated directly into the loyalty engine. The infrastructure handled exponential load increases transparently while maintaining consistent service quality, providing a foundation for future marketing automation and customer engagement expansion.",
+        "pain_points":          "Scaling loyalty programme membership without compromising email delivery quality; ensuring instant confirmation and loyalty number delivery to thousands of new members monthly",
+        "brevo_features_tags":  ["email", "API", "loyalty", "transactional"],
+        "best_for_verticals":   ["aviation", "travel", "transportation", "hospitality"],
+        "best_for_signals":     ["has_loyalty_program"],
+    },
+    {
+        "id":                   "suntransfers-revenue",
+        "company":              "Suntransfers",
+        "title":                "Suntransfers drives 40% revenue growth with Brevo",
+        "type":                 "case_study",
+        "industry":             "travel",
+        "url":                  "https://www.brevo.com/resources/success-story-suntransfers/",
+        "key_metrics":          "40% revenue growth; 2x faster campaign launches; >40% email open rates; campaign delivery in as little as 30 minutes",
+        "context":              "Suntransfers, Europe's leading airport transfer provider, achieved 40% revenue growth by implementing Brevo's marketing automation and CRM. Automated customer journeys across booking, pre-trip, and post-travel stages, combined with sub-account management for B2C and B2B operations and real-time analytics, halved campaign launch times.",
+        "pain_points":          "Fragmented marketing and CRM operations across customer journey stages; managing distinct B2C and B2B messaging; manual campaign creation slowing time-to-market",
+        "brevo_features_tags":  ["email", "automation", "CRM", "segmentation"],
+        "best_for_verticals":   ["travel", "transportation", "hospitality", "leisure"],
+        "best_for_signals":     [],
+    },
+    # ── Reports ───────────────────────────────────────────────────────────────
+    {
+        "id":                   "marketing-orchestration-benchmark-2026",
         "company":              "Brevo",
-        "title":                "The Complete Guide to Email and Loyalty Integration",
+        "title":                "2026 Marketing Orchestration Benchmark",
+        "type":                 "report",
+        "industry":             "cross_vertical",
+        "url":                  "https://www.brevo.com/resources/brevo-marketing-benchmark/",
+        "key_metrics":          "Mobile Wallet driving 95% average retention rate; 52% higher revenue per customer via Mobile Wallet; Mobile Wallet adoption up 43% year-over-year",
+        "context":              "Analysis of 150,000+ companies reveals how top performers balance email with complementary channels to prevent inbox fatigue. Top performers assign specific jobs to each channel: email nurtures relationships, SMS triggers immediate action, push provides utility, WhatsApp enables real-time conversation, and Wallet drives loyalty. High-volume senders are seeing declining CTR as inbox competition peaks.",
+        "pain_points":          "Email overload causing inbox fatigue and declining engagement; over-reliance on email as the sole marketing channel reducing revenue per email; rising unsubscribe rates from over-communication",
+        "brevo_features_tags":  ["email", "SMS", "wallet", "push", "WhatsApp", "omnichannel"],
+        "best_for_verticals":   ["retail", "ecommerce", "hospitality", "fashion", "education", "logistics"],
+        "best_for_signals":     [],
+    },
+    {
+        "id":                   "loyalty-benchmark-report",
+        "company":              "Brevo",
+        "title":                "Loyalty Benchmark Report: 250+ loyalty programmes analysed",
+        "type":                 "report",
+        "industry":             "retail",
+        "url":                  "https://www.brevo.com/resources/loyalty-benchmark-report/",
+        "key_metrics":          "64% of companies surveyed have a loyalty programme; 100% of mass retail companies have one; 90% of programmes are free to join",
+        "context":              "Exclusive analysis of loyalty programme adoption and effectiveness across 250+ Brevo customers. Reveals that every mass retailer uses a loyalty programme, with detailed insights into programme types, adoption trends, and industry-specific best practices that separate high-performing programmes from average ones.",
+        "pain_points":          "Uncertainty about industry loyalty benchmarks; lack of data on programme design and adoption; difficulty justifying loyalty investment to leadership",
+        "brevo_features_tags":  ["loyalty", "email", "CRM"],
+        "best_for_verticals":   ["retail", "ecommerce", "fashion", "food_beverage"],
+        "best_for_signals":     ["has_loyalty_program"],
+    },
+    # ── Ebooks ────────────────────────────────────────────────────────────────
+    {
+        "id":                   "smart-loyalty-guide",
+        "company":              "Brevo",
+        "title":                "The Loyalty Loop: A Martech Guide to Smart Loyalty Programs",
+        "type":                 "ebook",
+        "industry":             "cross_vertical",
+        "url":                  "https://www.brevo.com/resources/smart-loyalty-guide/",
+        "key_metrics":          "10% increase in engagement; 5% conversion rate growth; 42% revenue boost for companies running Smart Loyalty",
+        "context":              "Co-authored by Scott Brinker and Brevo, this guide redefines loyalty beyond points-for-spend to reward reviews, user-generated content, and referrals. Includes a Smart Loyalty Scorecard (Value + Vitality) and a crawl-walk-run implementation roadmap that works without rebuilding the existing marketing stack.",
+        "pain_points":          "Classic points-for-spend loyalty programmes stalling; acquisition becoming harder; loyalty underutilised as a growth lever; difficulty measuring long-term customer value",
+        "brevo_features_tags":  ["loyalty", "wallet", "email", "automation"],
+        "best_for_verticals":   ["retail", "ecommerce", "hospitality", "food_beverage", "fashion"],
+        "best_for_signals":     ["has_loyalty_program"],
+    },
+    {
+        "id":                   "mobile-wallet-loyalty-ebook",
+        "company":              "Brevo",
+        "title":                "Mobile Wallet & Loyalty Program — practical integration guide",
+        "type":                 "ebook",
+        "industry":             "cross_vertical",
+        "url":                  "https://www.brevo.com/resources/mobile-wallet-and-loyalty-program/",
+        "key_metrics":          "2x revenue per customer for Maison 123 through wallet integration; 65% of consumers prefer to centralise loyalty cards on smartphones; 90% mobile wallet adoption among 18–24 year olds",
+        "context":              "Practical guide to integrating mobile wallet technology with loyalty programmes to enhance customer experience and drive revenue. Covers wallet-loyalty synergy with concrete brand examples and adoption statistics showing how wallet integration transforms retention and purchase frequency.",
+        "pain_points":          "Consumers seeking digital solutions for managing loyalty cards; need to centralise loyalty across channels; engagement and retention challenges with existing programmes",
+        "brevo_features_tags":  ["wallet", "loyalty", "push_notifications", "email"],
+        "best_for_verticals":   ["retail", "ecommerce", "hospitality", "fashion"],
+        "best_for_signals":     ["has_wallet", "has_loyalty_program"],
+    },
+    {
+        "id":                   "cdp-use-cases-retail",
+        "company":              "Brevo",
+        "title":                "9 CDP Use Cases for Retailers",
         "type":                 "ebook",
         "industry":             "retail",
-        "url":                  "https://www.brevo.com/resources/placeholder-ebook/",
-        "key_metrics":          "Replace with headline outcomes or stats from the ebook",
-        "context":              "Replace with what the ebook covers and who it's aimed at",
-        "pain_points":          "Replace with the pain points this ebook addresses",
-        "brevo_features_tags":  ["loyalty", "email", "CRM"],
-        "best_for_verticals":   ["retail", "ecommerce", "hospitality"],
-        "best_for_signals":     ["has_loyalty_program"],
+        "url":                  "https://www.brevo.com/resources/cdp-use-cases-retail/",
+        "key_metrics":          "10% increase in engagement; 5% conversion rate growth; 42% revenue boost",
+        "context":              "Nine real-world CDP use cases built specifically for retailers, covering RFM targeting, inventory demand planning, churn prediction, and precision personalisation. Shows how unified customer data enables agile marketing and more informed decisions across every customer-facing team.",
+        "pain_points":          "Lack of accurate and complete customer data; inability to target with precision; poor customer intelligence; difficulty identifying trends in customer behaviour",
+        "brevo_features_tags":  ["CDP", "segmentation", "email", "automation"],
+        "best_for_verticals":   ["retail", "ecommerce", "fashion"],
+        "best_for_signals":     ["needs_cdp"],
     },
 ]
 
 
-# ── Tool definition for Claude API ────────────────────────────────────────────
+# ── Tool definition ────────────────────────────────────────────────────────────
 
 RESOURCE_TOOL_DEFINITION: dict[str, Any] = {
     "name": "search_brevo_resources",
     "description": (
         "Returns all available Brevo case studies, reports, and ebooks. "
-        "Review every resource in the result and select the single most relevant one "
+        "Review every resource in the result and select the SINGLE most relevant one "
         "for this contact, based on their vertical, signal flags (loyalty/CDP/wallet), "
         "and the resource selection rules defined in each email section of the prompt. "
-        "Use the selected resource to fill in all resource.* fields when generating content."
+        "Use the selected resource to populate all resource.* fields when generating content."
     ),
     "input_schema": {
         "type": "object",
@@ -98,5 +277,4 @@ RESOURCE_TOOL_DEFINITION: dict[str, Any] = {
 
 
 def get_all_resources() -> list[dict[str, Any]]:
-    """Returns the full resource catalogue as a list."""
     return RESOURCES
