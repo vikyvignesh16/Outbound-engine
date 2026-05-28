@@ -1,20 +1,19 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
-import uuid
 from datetime import datetime, timezone
 
 import anthropic
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 
 from db.client import get_supabase, fetch_all
 from utils.slack import notify
 
-# Standard API pricing (not Batch)
-_INPUT_COST_PER_TOKEN  = 3.00 / 1_000_000
-_OUTPUT_COST_PER_TOKEN = 15.00 / 1_000_000
-_CONCURRENCY = 5
+_BATCH_INPUT_COST_PER_TOKEN  = 1.50 / 1_000_000
+_BATCH_OUTPUT_COST_PER_TOKEN = 7.50 / 1_000_000
+_BATCH_SIZE = 500
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -22,6 +21,11 @@ router = APIRouter()
 
 def _get_client() -> anthropic.AsyncAnthropic:
     return anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+
+def _encode_custom_id(domain: str, email: str) -> str:
+    raw = f"{domain}||{email or ''}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:64]
 
 
 def _get_resource(vertical: str, has_loyalty: bool, needs_cdp: bool, has_wallet: bool) -> dict:
@@ -485,50 +489,36 @@ code fences:
 }}"""
 
 
-# ── Process single contact ─────────────────────────────────────────────────────
-
-async def _process_one(
-    client: anthropic.AsyncAnthropic,
-    semaphore: asyncio.Semaphore,
-    sb,
-    contact: dict,
-    company: dict,
-    resource: dict,
-) -> tuple[bool, int, int]:
-    """Returns (success, input_tokens, output_tokens)."""
-    async with semaphore:
-        try:
-            prompt = _build_content_prompt(contact, company, resource)
-            response = await client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}],
-            )
-
-            text = response.content[0].text.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            content_json = json.loads(text)
-
-            sb.table("sourced_contacts").update({
-                "outbound_content":      content_json,
-                "content_generated_at":  datetime.now(timezone.utc).isoformat(),
-            }).eq("id", contact["id"]).execute()
-
-            return True, response.usage.input_tokens, response.usage.output_tokens
-
-        except Exception as exc:
-            logger.warning("content: failed for contact %s (%s): %s", contact["id"], contact.get("email"), exc)
-            return False, 0, 0
+def _build_batch_requests(contacts: list[dict], company_map: dict, resource_map: dict) -> list[dict]:
+    return [
+        {
+            "custom_id": _encode_custom_id(c["domain"], c.get("email") or ""),
+            "params": {
+                "model":      "claude-sonnet-4-6",
+                "max_tokens": 4000,
+                "messages": [
+                    {
+                        "role":    "user",
+                        "content": _build_content_prompt(
+                            contact=c,
+                            company=company_map.get((c["domain"], c.get("market") or ""), {}),
+                            resource=resource_map.get(c["domain"], {}),
+                        ),
+                    }
+                ],
+            },
+        }
+        for c in contacts
+    ]
 
 
-# ── Main submit function ──────────────────────────────────────────────────────
+# ── Submit ────────────────────────────────────────────────────────────────────
 
 async def submit_content(limit: int | None = None) -> dict:
     """
-    Reads sourced_contacts with no outbound_content, fetches company context
-    from priority_tam, generates content via standard Claude API with
-    controlled concurrency, and writes outbound_content jsonb back.
+    Reads sourced_contacts with no content_generated_at, enriches with company
+    context from priority_tam, submits to Claude Batch API in chunks of 500,
+    and records jobs in contact_content_batches.
     """
     sb = get_supabase()
 
@@ -550,9 +540,8 @@ async def submit_content(limit: int | None = None) -> dict:
 
     if not contacts:
         logger.info("content: no contacts pending generation")
-        return {"status": "ok", "submitted": 0, "processed": 0, "errors": 0}
+        return {"status": "ok", "submitted": 0, "batches": 0, "batch_ids": []}
 
-    # Build domain+market → company context from priority_tam
     domains = list({c["domain"] for c in contacts})
     company_rows = fetch_all(
         "priority_tam",
@@ -563,87 +552,177 @@ async def submit_content(limit: int | None = None) -> dict:
     )
     company_map = {(r["domain"], r.get("market", "")): r for r in company_rows}
 
-    client = _get_client()
-    semaphore = asyncio.Semaphore(_CONCURRENCY)
-
-    # Track this run in contact_content_batches
-    run_id = str(uuid.uuid4())
-    sb.table("contact_content_batches").insert({
-        "batch_id":           run_id,
-        "model":              "claude-sonnet-4-6",
-        "status":             "pending",
-        "contacts_submitted": len(contacts),
-    }).execute()
-
-    tasks = []
-    for c in contacts:
-        company = company_map.get((c["domain"], c.get("market") or ""), {})
-        resource = _get_resource(
-            vertical=company.get("vertical", ""),
-            has_loyalty=company.get("has_loyalty_program", False),
-            needs_cdp=company.get("needs_cdp", False),
-            has_wallet=company.get("has_wallet", False),
+    resource_map = {
+        c["domain"]: _get_resource(
+            vertical=company_map.get((c["domain"], c.get("market") or ""), {}).get("vertical", ""),
+            has_loyalty=company_map.get((c["domain"], c.get("market") or ""), {}).get("has_loyalty_program", False),
+            needs_cdp=company_map.get((c["domain"], c.get("market") or ""), {}).get("needs_cdp", False),
+            has_wallet=company_map.get((c["domain"], c.get("market") or ""), {}).get("has_wallet", False),
         )
-        tasks.append(_process_one(client, semaphore, sb, c, company, resource))
+        for c in contacts
+    }
 
-    results = await asyncio.gather(*tasks)
+    client = _get_client()
+    chunks = [contacts[i : i + _BATCH_SIZE] for i in range(0, len(contacts), _BATCH_SIZE)]
 
-    successes  = sum(1 for ok, _, _ in results if ok)
-    errors     = len(results) - successes
-    total_in   = sum(i for _, i, _ in results)
-    total_out  = sum(o for _, _, o in results)
-    cost       = total_in * _INPUT_COST_PER_TOKEN + total_out * _OUTPUT_COST_PER_TOKEN
+    async def submit_chunk(chunk: list[dict]) -> str:
+        batch = await client.messages.batches.create(
+            requests=_build_batch_requests(chunk, company_map, resource_map)
+        )
+        mapping = {
+            _encode_custom_id(c["domain"], c.get("email") or ""): {
+                "contact_id": c["id"],
+                "email":      c.get("email"),
+                "domain":     c["domain"],
+            }
+            for c in chunk
+        }
+        sb.table("contact_content_batches").insert({
+            "batch_id":           batch.id,
+            "model":              "claude-sonnet-4-6",
+            "status":             "pending",
+            "contacts_submitted": len(chunk),
+            "request_mapping":    mapping,
+        }).execute()
+        logger.info("content: submitted batch %s for %d contacts", batch.id, len(chunk))
+        return batch.id
 
+    batch_ids = await asyncio.gather(*[submit_chunk(c) for c in chunks])
+    logger.info("content: %d batches submitted, %d contacts total", len(batch_ids), len(contacts))
+    return {"status": "ok", "submitted": len(contacts), "batches": len(batch_ids), "batch_ids": list(batch_ids)}
+
+
+# ── Process results ───────────────────────────────────────────────────────────
+
+async def process_content_results(batch_id: str) -> dict:
+    """Polls a batch. If complete, writes outbound_content jsonb to sourced_contacts."""
+    client = _get_client()
+    batch = await client.messages.batches.retrieve(batch_id)
+
+    if batch.processing_status != "ended":
+        return {"status": "pending", "batch_id": batch_id}
+
+    sb = get_supabase()
+    batch_row = (
+        sb.table("contact_content_batches")
+        .select("request_mapping")
+        .eq("batch_id", batch_id)
+        .execute()
+        .data
+    )
+    request_mapping: dict = batch_row[0]["request_mapping"] if batch_row else {}
+
+    updates: list[dict] = []
+    total_input = 0
+    total_output = 0
+
+    async for result in await client.messages.batches.results(batch_id):
+        if result.result.type != "succeeded":
+            logger.warning("content: skipping %s result for %s", result.result.type, result.custom_id)
+            continue
+
+        meta = request_mapping.get(result.custom_id)
+        if not meta:
+            logger.warning("content: no mapping found for custom_id %s", result.custom_id)
+            continue
+
+        raw_text = result.result.message.content[0].text.strip()
+        try:
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            content_json = json.loads(raw_text)
+        except (json.JSONDecodeError, IndexError) as exc:
+            logger.warning("content: failed to parse JSON for %s: %s", result.custom_id, exc)
+            continue
+
+        usage = result.result.message.usage
+        total_input  += usage.input_tokens
+        total_output += usage.output_tokens
+
+        updates.append({
+            "id":                   meta["contact_id"],
+            "outbound_content":     content_json,
+            "content_batch_id":     batch_id,
+            "content_generated_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    for i in range(0, len(updates), 100):
+        sb.table("sourced_contacts").upsert(updates[i : i + 100], on_conflict="id").execute()
+
+    cost = total_input * _BATCH_INPUT_COST_PER_TOKEN + total_output * _BATCH_OUTPUT_COST_PER_TOKEN
     sb.table("contact_content_batches").update({
         "status":             "completed",
-        "contacts_completed": successes,
-        "input_tokens":       total_in,
-        "output_tokens":      total_out,
+        "contacts_completed": len(updates),
+        "input_tokens":       total_input,
+        "output_tokens":      total_output,
         "estimated_cost_usd": round(cost, 6),
         "completed_at":       datetime.now(timezone.utc).isoformat(),
-    }).eq("batch_id", run_id).execute()
+    }).eq("batch_id", batch_id).execute()
 
-    logger.info(
-        "content: %d/%d contacts generated — $%.4f",
-        successes, len(contacts), cost,
-    )
+    logger.info("content: completed batch %s — %d contacts, $%.4f", batch_id, len(updates), cost)
     return {
         "status":             "ok",
-        "processed":          successes,
-        "errors":             errors,
-        "input_tokens":       total_in,
-        "output_tokens":      total_out,
+        "batch_id":           batch_id,
+        "completed":          len(updates),
+        "input_tokens":       total_input,
+        "output_tokens":      total_output,
         "estimated_cost_usd": round(cost, 4),
     }
 
 
-async def _run_content_bg(limit: int | None = None) -> None:
-    try:
-        result = await submit_content(limit=limit)
-        if result["processed"] > 0:
-            await notify(
-                f"✅ *Content generation complete*\n"
-                f"• Generated: {result['processed']} contacts\n"
-                f"• Errors: {result['errors']}\n"
-                f"• Estimated cost: ${result['estimated_cost_usd']:.4f}"
-            )
-    except Exception as exc:
-        await notify(f"❌ *Content generation failed* — `{exc}`", success=False)
-        logger.exception("content: background run failed")
-        raise
+# ── Poll all pending ──────────────────────────────────────────────────────────
+
+async def process_all_pending_content() -> dict:
+    """Called by enrich-poller every 30 min. Polls pending batches and writes results."""
+    sb = get_supabase()
+    pending = (
+        sb.table("contact_content_batches")
+        .select("batch_id")
+        .eq("status", "pending")
+        .execute()
+        .data
+    )
+
+    if not pending:
+        return {"status": "ok", "pending": 0, "message": "no pending batches"}
+
+    results = await asyncio.gather(*[process_content_results(r["batch_id"]) for r in pending])
+
+    still_pending = sum(1 for r in results if r["status"] == "pending")
+    if still_pending:
+        logger.info("content: %d/%d batches still pending", still_pending, len(results))
+        return {"status": "ok", "pending": still_pending, "completed": len(results) - still_pending}
+
+    total_contacts = sum(r.get("completed", 0) for r in results)
+    total_cost     = sum(r.get("estimated_cost_usd", 0) for r in results)
+
+    await notify(
+        f"✅ *Contact content generation complete*\n"
+        f"• Contacts generated: {total_contacts}\n"
+        f"• Batches: {len(results)}\n"
+        f"• Estimated cost: ${total_cost:.4f}"
+    )
+
+    return {"status": "ok", "pending": 0, "completed": total_contacts, "estimated_cost_usd": round(total_cost, 4)}
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/pipelines/content/submit")
-async def content_submit(background_tasks: BackgroundTasks, limit: int | None = None):
-    """Generate outbound sequence content for all contacts with no content_generated_at."""
-    background_tasks.add_task(_run_content_bg, limit=limit)
-    return {"status": "started"}
+async def content_submit(limit: int | None = None):
+    """Submit sourced_contacts with no content to Claude Batch API."""
+    try:
+        return await submit_content(limit=limit)
+    except Exception as exc:
+        logger.exception("content_submit: failed")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/pipelines/content-complete-all")
-async def content_complete_all(background_tasks: BackgroundTasks):
-    """Alias for /pipelines/content/submit — processes all pending contacts."""
-    background_tasks.add_task(_run_content_bg)
-    return {"status": "started"}
+async def content_complete_all():
+    """Poll all pending content batches and write outbound_content to sourced_contacts."""
+    try:
+        return await process_all_pending_content()
+    except Exception as exc:
+        logger.exception("content_complete_all: failed")
+        raise HTTPException(status_code=500, detail=str(exc))
