@@ -51,6 +51,9 @@ class ClayContactRow(BaseModel):
     job_title: Optional[str] = None
     seniority: Optional[str] = None
     linkedin_url: Optional[str] = None
+    company_name: Optional[str] = None
+    market: Optional[str] = None
+    batch_number: Optional[int] = None
 
 class ClayContactsPayload(BaseModel):
     run_id: str
