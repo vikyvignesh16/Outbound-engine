@@ -213,6 +213,9 @@ Rules:
 - Use account_narrative as background context to sharpen
   the hook — do not quote directly
 - No exclamation marks
+- Always use "I work with" — never "working with" or any
+  participial fragment; every sentence must have a full
+  subject and verb
 - Conversational and human — should not read as automated
 - Count characters before outputting — must be under 300
 
@@ -239,6 +242,9 @@ Rules:
   quote directly
 - End with an open door that invites a reply without
   demanding one
+- Always use "I spend" not "Spend" — full subject and verb
+  on every sentence; never use an imperative or participial
+  sentence opener
 - No exclamation marks
 - Should feel like a message a thoughtful person wrote
 
@@ -339,12 +345,11 @@ Rules:
 
 ### email_3_paragraph_1
 
-Generate the single body paragraph of email 3.
-This paragraph must do everything in one — hook,
-content reference, key finding, and CTA lead-in.
+Generate the first paragraph of email 3.
+Hook + report reference + key finding.
 
 Rules:
-- 3-4 sentences maximum
+- 2-3 sentences maximum
 - Should feel like a colleague sharing something
   useful — not a marketing email pushing content
 - Reference resource.title naturally — do not open
@@ -354,12 +359,27 @@ Rules:
 - Include one specific finding or stat from
   resource.context — written as a sentence, not
   a bullet point, not quoted directly
+- Do not include the CTA in this paragraph
+- Match tone of email_1_paragraph_1 for consistency
+
+---
+
+### email_3_paragraph_2
+
+Generate the second and final paragraph of email 3.
+Relevance to their situation + CTA anchor sentence.
+
+Rules:
+- 2-3 sentences maximum
+- Must flow directly from email_3_paragraph_1
+- Connect the finding directly to company_name's
+  situation — make it feel relevant to their vertical
+  and job_title
 - Use account_narrative as context — do not quote
 - End with a sentence that naturally leads into the
   CTA and serves as the anchor text for the booking
   link — make the conversation feel like the obvious
   next step
-- Match tone of email_1_paragraph_1 for consistency
 
 ---
 
@@ -476,6 +496,7 @@ code fences:
   "email_2_paragraph_2": "",
   "subject_line_3": "",
   "email_3_paragraph_1": "",
+  "email_3_paragraph_2": "",
   "linkedin_message_2": "",
   "subject_line_4": "",
   "email_4_paragraph_1": "",
