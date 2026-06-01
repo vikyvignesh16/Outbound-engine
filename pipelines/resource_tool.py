@@ -1,8 +1,8 @@
 """
 Brevo resource catalogue for outbound content generation.
 
-Claude receives all resources via the search_brevo_resources tool and selects
-the single most relevant one per contact based on vertical and signals.
+Resources are pre-selected in Python via select_resource() before being
+injected into the prompt — no tool call needed.
 """
 
 from typing import Any
@@ -278,3 +278,24 @@ RESOURCE_TOOL_DEFINITION: dict[str, Any] = {
 
 def get_all_resources() -> list[dict[str, Any]]:
     return RESOURCES
+
+
+def select_resource(company: dict) -> dict:
+    """
+    Scores all resources against company signals and vertical, returns the best match.
+    Scoring: signal overlap (primary) > vertical match (secondary) > case study type (tiebreak).
+    """
+    vertical = (company.get("vertical") or "").lower()
+
+    active_signals: set[str] = set()
+    if company.get("has_loyalty_program"): active_signals.add("has_loyalty_program")
+    if company.get("has_wallet"):          active_signals.add("has_wallet")
+    if company.get("needs_cdp"):           active_signals.add("needs_cdp")
+
+    def _score(r: dict) -> tuple[int, int, int]:
+        signal_score = len(active_signals & set(r["best_for_signals"]))
+        vert_score   = sum(1 for v in r["best_for_verticals"] if v in vertical or vertical in v)
+        type_score   = 1 if r["type"] == "case_study" else 0
+        return (signal_score, vert_score, type_score)
+
+    return max(RESOURCES, key=_score)

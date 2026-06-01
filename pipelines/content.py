@@ -9,7 +9,7 @@ import anthropic
 from fastapi import APIRouter, HTTPException
 
 from db.client import get_supabase, fetch_all
-from pipelines.resource_tool import RESOURCE_TOOL_DEFINITION, get_all_resources
+from pipelines.resource_tool import select_resource
 from utils.slack import notify
 
 _BATCH_INPUT_COST_PER_TOKEN  = 1.50 / 1_000_000
@@ -29,7 +29,7 @@ def _encode_custom_id(domain: str, email: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:64]
 
 
-def _build_content_prompt(contact: dict, company: dict) -> str:
+def _build_content_prompt(contact: dict, company: dict, resource: dict) -> str:
     return f"""You are an expert B2B outbound copywriter for Brevo, a CRM and
 marketing automation platform. Your job is to generate personalised
 outbound sequence content for a specific contact. You will generate
@@ -485,15 +485,18 @@ Rules:
 
 ---
 
-## Resource selection
+## Selected resource
 
-You have been provided with the result of a search_brevo_resources tool call above.
-Review every resource in that result and select the single most relevant one for this
-contact based on their vertical, signals (loyalty/CDP/wallet), and the resource
-selection rules defined in each email section. Use the selected resource as the
-resource.* data (resource.company, resource.title, resource.type, resource.industry,
-resource.key_metrics, resource.context, resource.pain_points, resource.brevo_features_tags)
-throughout your content generation.
+Use the following resource as resource.* throughout your content generation.
+
+- resource.company: {resource.get('company')}
+- resource.title: {resource.get('title')}
+- resource.type: {resource.get('type')}
+- resource.industry: {resource.get('industry')}
+- resource.key_metrics: {resource.get('key_metrics')}
+- resource.context: {resource.get('context')}
+- resource.pain_points: {resource.get('pain_points')}
+- resource.brevo_features_tags: {resource.get('brevo_features_tags')}
 
 ---
 
@@ -524,55 +527,20 @@ code fences:
 
 
 def _build_batch_requests(contacts: list[dict], company_map: dict) -> list[dict]:
-    resources_json = json.dumps(get_all_resources())
-
     requests = []
     for c in contacts:
-        company = company_map.get((c["domain"], c.get("market") or ""), {})
+        company  = company_map.get((c["domain"], c.get("market") or ""), {})
+        resource = select_resource(company)
         requests.append({
             "custom_id": _encode_custom_id(c["domain"], c.get("email") or ""),
             "params": {
                 "model":      "claude-sonnet-4-6",
-                "max_tokens": 6000,
+                "max_tokens": 4000,
                 "system":     "You are a B2B copywriter. Output ONLY the raw JSON object requested. No reasoning, no analysis, no markdown fences, no preamble. Start your response with { and end with }.",
-                "tools":      [RESOURCE_TOOL_DEFINITION],
                 "messages": [
-                    # User prompt — contact/company data + all generation rules
                     {
                         "role":    "user",
-                        "content": _build_content_prompt(c, company),
-                    },
-                    # Pre-loaded: Claude's tool call with this contact's signals
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type":  "tool_use",
-                                "id":    "toolu_resources",
-                                "name":  "search_brevo_resources",
-                                "input": {
-                                    "vertical":            company.get("vertical", ""),
-                                    "has_loyalty_program": bool(company.get("has_loyalty_program")),
-                                    "needs_cdp":           bool(company.get("needs_cdp")),
-                                    "has_wallet":          bool(company.get("has_wallet")),
-                                },
-                            }
-                        ],
-                    },
-                    # Pre-loaded: Tool result — full resource catalogue for Claude to select from
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type":        "tool_result",
-                                "tool_use_id": "toolu_resources",
-                                "content":     resources_json,
-                            },
-                            {
-                                "type": "text",
-                                "text": "Output the JSON object only. Start with { and end with }. No reasoning, no preamble, no markdown.",
-                            },
-                        ],
+                        "content": _build_content_prompt(c, company, resource),
                     },
                 ],
             },
