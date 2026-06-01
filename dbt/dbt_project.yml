@@ -4,3 +4,10 @@ config-version: 2
 profile: brevo_abm
 model-paths: ["models"]
 test-paths: ["models"]
+
+models:
+  brevo_abm:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

@@ -53,3 +53,54 @@ sources:
             tests: [not_null]
           - name: batch_month
             tests: [not_null]
+
+      - name: sourced_contacts
+        columns:
+          - name: id
+            tests: [not_null, unique]
+          - name: domain
+            tests: [not_null]
+
+      - name: enrichment_batches
+        columns:
+          - name: batch_id
+            tests: [not_null, unique]
+          - name: status
+            tests:
+              - accepted_values:
+                  values: [pending, completed, failed]
+
+      - name: contact_content_batches
+        columns:
+          - name: batch_id
+            tests: [not_null, unique]
+          - name: status
+            tests:
+              - accepted_values:
+                  values: [pending, completed, failed]
+
+models:
+  - name: stg_sourced_tam
+    description: "Cleaned sourced_tam_v2 — raw TAM companies from Clay"
+  - name: stg_qualified_tam
+    description: "Cleaned qualified_tam_v2 — companies after enrichment scoring"
+  - name: stg_priority_tam
+    description: "Cleaned priority_tam — top-priority companies for outbound"
+  - name: stg_campaign_batches
+    description: "Cleaned campaign_batches — monthly batch assignments"
+  - name: stg_sourced_contacts
+    description: "Cleaned sourced_contacts — individual contacts from Clay"
+  - name: stg_enrichment_batches
+    description: "Cleaned enrichment_batches — Claude Batch API company enrichment jobs"
+  - name: stg_contact_content_batches
+    description: "Cleaned contact_content_batches — Claude Batch API content generation jobs"
+  - name: mart_pipeline_funnel
+    description: "Company count at each pipeline stage, per market"
+  - name: mart_tam_quality
+    description: "Fit score and signal distribution across priority TAM"
+  - name: mart_batch_coverage
+    description: "Delivery progress per batch cohort and market"
+  - name: mart_pipeline_remaining
+    description: "Priority companies not yet batched, by market / vertical / fit score"
+  - name: mart_ai_costs
+    description: "Unified enrichment + content AI spend per batch"

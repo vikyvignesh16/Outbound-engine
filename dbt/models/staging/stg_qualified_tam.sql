@@ -1,0 +1,19 @@
+SELECT
+    domain,
+    market,
+    company_name,
+    vertical,
+    company_type,
+    employee_range,
+    esp_detected,
+    esp_score,
+    account_fit_score,
+    account_narrative,
+    email_crm_activity,
+    has_wallet,
+    has_loyalty_program,
+    needs_cdp,
+    brevo_company_id,
+    open_deals,
+    deal_lost_date
+FROM {{ source('public', 'qualified_tam_v2') }}
