@@ -66,8 +66,21 @@ and company — not like a mass email sequence.
   "I know you're busy" or "I hope this finds you well"
 - Do not quote input fields directly — use them as context
   to inform the writing
-- Every paragraph must flow naturally from the previous one
-  within the same email — read what came before before writing
+- No dashes of any kind in email copy — no em dash (—),
+  no en dash (–), no hyphen used as a pause or aside.
+  If you feel the urge to use a dash, rewrite the sentence
+  using a comma, a full stop, or restructure entirely.
+  Dashes make copy feel formatted rather than written.
+  This rule applies to all four emails. It does not apply
+  to LinkedIn content.
+- Each complete email must be 150 to 200 words in total
+  across all its paragraphs combined. Count the words before
+  outputting. If over 200, cut. If under 150, add substance
+  not padding.
+- Paragraphs within the same email must connect. The opening
+  of each paragraph should pick up the thread from where the
+  previous paragraph ended, not restart from a new angle.
+  Read the paragraph you just wrote before starting the next.
 - Never mention Brevo features as a list — weave them
   naturally into sentences
 - The CTA is always a hyperlink — the closing sentence of
@@ -518,7 +531,8 @@ def _build_batch_requests(contacts: list[dict], company_map: dict) -> list[dict]
             "custom_id": _encode_custom_id(c["domain"], c.get("email") or ""),
             "params": {
                 "model":      "claude-sonnet-4-6",
-                "max_tokens": 4000,
+                "max_tokens": 6000,
+                "system":     "You are a B2B copywriter. Output ONLY the raw JSON object requested. No reasoning, no analysis, no markdown fences, no preamble. Start your response with { and end with }.",
                 "tools":      [RESOURCE_TOOL_DEFINITION],
                 "messages": [
                     # User prompt — contact/company data + all generation rules
@@ -551,7 +565,11 @@ def _build_batch_requests(contacts: list[dict], company_map: dict) -> list[dict]
                                 "type":        "tool_result",
                                 "tool_use_id": "toolu_resources",
                                 "content":     resources_json,
-                            }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Output the JSON object only. Start with { and end with }. No reasoning, no preamble, no markdown.",
+                            },
                         ],
                     },
                 ],
@@ -666,8 +684,17 @@ async def process_content_results(batch_id: str) -> dict:
 
         raw_text = result.result.message.content[0].text.strip()
         try:
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            # Strip markdown fences if present anywhere in the response
+            if "```" in raw_text:
+                raw_text = raw_text.split("```", 1)[1]
+                if raw_text.startswith("json"):
+                    raw_text = raw_text[4:]
+                raw_text = raw_text.rsplit("```", 1)[0].strip()
+            # Extract outermost JSON object — handles leading prose
+            start = raw_text.find("{")
+            end   = raw_text.rfind("}") + 1
+            if start != -1 and end > start:
+                raw_text = raw_text[start:end]
             content_json = json.loads(raw_text)
         except (json.JSONDecodeError, IndexError) as exc:
             logger.warning("content: failed to parse JSON for %s: %s", result.custom_id, exc)
