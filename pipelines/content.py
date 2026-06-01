@@ -73,10 +73,12 @@ and company — not like a mass email sequence.
   Dashes make copy feel formatted rather than written.
   This rule applies to all four emails. It does not apply
   to LinkedIn content.
-- Each complete email must be 150 to 200 words in total
-  across all its paragraphs combined. Count the words before
+- Emails 1, 2, and 3 must be 150 to 200 words in total
+  across all their paragraphs combined. Count before
   outputting. If over 200, cut. If under 150, add substance
   not padding.
+- Email 4 must be 80 to 120 words in total. It is a
+  breakup email — short is intentional. Do not pad it.
 - Paragraphs within the same email must connect. The opening
   of each paragraph should pick up the thread from where the
   previous paragraph ended, not restart from a new angle.
