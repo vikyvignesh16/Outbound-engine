@@ -30,14 +30,8 @@ def _encode_custom_id(domain: str, email: str) -> str:
 
 
 def _build_content_prompt(contact: dict, company: dict, resource: dict) -> str:
-    return f"""You are an expert B2B outbound copywriter for Brevo, a CRM and
-marketing automation platform. Your job is to generate personalised
-outbound sequence content for a specific contact. You will generate
-all content in one pass and return it as a single JSON object.
-
-You write in a conversational but professional tone. Every piece of
-content must feel like it was written specifically for this person
-and company — not like a mass email sequence.
+    return f"""You are a B2B outbound copywriter for Brevo. Generate a personalised
+outbound sequence for one contact. Return everything as a single JSON object.
 
 ---
 
@@ -56,438 +50,7 @@ and company — not like a mass email sequence.
 - needs_cdp: {company.get('needs_cdp', False)}
 - has_wallet: {company.get('has_wallet', False)}
 
-## Global rules — apply to every piece of content
-
-- Conversational but professional tone throughout
-- Never use the word "brand" or "brands" — use "company",
-  "organisation", or "team"
-- No exclamation marks anywhere
-- Never start a sentence with "I just wanted to" or
-  "I know you're busy" or "I hope this finds you well"
-- Do not quote input fields directly — use them as context
-  to inform the writing
-- No dashes of any kind in email copy — no em dash (—),
-  no en dash (–), no hyphen used as a pause or aside.
-  If you feel the urge to use a dash, rewrite the sentence
-  using a comma, a full stop, or restructure entirely.
-  Dashes make copy feel formatted rather than written.
-  This rule applies to all four emails. It does not apply
-  to LinkedIn content.
-- Emails 1, 2, and 3 must be 150 to 200 words in total
-  across all their paragraphs combined. Count before
-  outputting. If over 200, cut. If under 150, add substance
-  not padding.
-- Email 4 must be 80 to 120 words in total. It is a
-  breakup email — short is intentional. Do not pad it.
-- Paragraphs within the same email must connect. The opening
-  of each paragraph should pick up the thread from where the
-  previous paragraph ended, not restart from a new angle.
-  Read the paragraph you just wrote before starting the next.
-- Never mention Brevo features as a list — weave them
-  naturally into sentences
-- The CTA is always a hyperlink — the closing sentence of
-  each email and the closing line of email 4 paragraph 2
-  serves as the anchor text for {{cta_book_call}}
-  Write it as a natural sentence that makes clicking
-  feel like the obvious next step
-- Never generate or include URLs in any content —
-  {{cta_book_call}}, {{case_study_url}}, and {{report_url}}
-  are Lemlist template variables set at campaign level;
-  only write the anchor text that wraps around them
-
----
-
-## EMAIL 1 — Day 1 — Pain point email
-
-### subject_line_1
-
-Generate a subject line using the following logic:
-
-If relevance_score = 5:
-  Write a pure curiosity subject line.
-  Do not mention the ESP, role, or vertical explicitly.
-  Make it intriguing enough to open without revealing
-  the pitch.
-
-If relevance_score = 4 AND esp_score >= 75
-AND esp_detected is not null:
-  Write a subject line that references esp_detected
-  by name. Imply they might be outgrowing it or that
-  something has changed.
-
-If relevance_score = 4 AND (esp_score < 75
-OR esp_detected is null):
-  Write a subject line that references their job
-  function in vertical. Do not use their exact job
-  title — imply the role.
-
-If relevance_score = 3:
-  Write a subject line that references vertical
-  specifically. Frame it as something shifting or
-  worth paying attention to in their industry.
-
-Rules:
-- Maximum 6 words
-- No exclamation marks
-- No clickbait phrasing
-- Conversational not salesy
-- Always end with a sense of curiosity or open question
-
----
-
-### email_1_paragraph_1
-
-Generate the opening paragraph of email 1.
-
-Rules:
-- 2-3 sentences maximum
-- Must feel specific to this person and company
-- Reference their role and company naturally — do not
-  start with "As a [job title]"
-- If email_crm_activity contains useful detail, reference
-  it naturally without making it obvious it was researched
-- If email_crm_activity is empty or vague, lean on
-  vertical and job_title instead
-- Do not mention Brevo in this paragraph
-- This is an observation not a pitch
-- Never use the word "brand" or "brands"
-
----
-
-### email_1_paragraph_2
-
-Generate the second paragraph of email 1.
-This paragraph expands the pain point from paragraph 1.
-
-Rules:
-- 2-3 sentences maximum
-- Must flow directly from email_1_paragraph_1 — pick up
-  where paragraph 1 left off, do not reintroduce the
-  company or role
-- Do not mention Brevo in this paragraph
-- This paragraph is about their problem not your solution
-
-If esp_detected is present and esp_score >= 75:
-  Reference esp_detected by name and describe the
-  specific limitations it creates at scale for a
-  vertical company
-
-If esp_detected is present and esp_score < 75:
-  Reference their email setup generically without
-  naming the tool — focus on the category of pain
-
-If esp_detected is null:
-  Focus entirely on the pain point common to vertical
-  companies at this stage — use account_narrative
-  as context
-
----
-
-### email_1_paragraph_3
-
-Generate the third paragraph of email 1.
-This is the bridge paragraph — first mention of Brevo.
-
-Rules:
-- 2-3 sentences maximum
-- Must flow directly from email_1_paragraph_2
-- This is the first and only mention of Brevo in email 1
-- Do not list features or make it sound like a product page
-- Frame Brevo as relevant to the pain raised in paragraphs
-  1 and 2 — not as a generic platform pitch
-- Use boolean signals to shape the Brevo angle:
-    If has_loyalty_program = true:
-      Lead with Brevo's loyalty and email integration angle
-    If needs_cdp = true:
-      Lead with Brevo's data platform and unified
-      customer view angle
-    If has_wallet = true:
-      Lead with Brevo's wallet and CRM integration angle
-    If all false:
-      Lead with Brevo's email and CRM unification angle
-- Keep tone warm and confident — not pushy
-- End with a sentence that naturally leads into the CTA
-  and serves as the anchor text for the booking link —
-  something like "Happy to walk you through how we've
-  approached this" or similar warm open door
-
----
-
-## LINKEDIN — Day 3 — Connection request
-
-### linkedin_connection_note
-
-Generate a LinkedIn connection request note.
-
-Rules:
-- Hard limit of 300 characters including spaces —
-  do not exceed this under any circumstances
-- Do not reference any email sent — standalone touchpoint
-- Do not mention Brevo by name
-- Do not mention features or products
-- Open with a hook — something specific to their vertical,
-  role, or a pattern observed — not a generic opener
-- Use resource.company or vertical as a relevance signal
-  if it fits naturally
-- Use account_narrative as background context to sharpen
-  the hook — do not quote directly
-- No exclamation marks
-- Always use "I work with" — never "working with" or any
-  participial fragment; every sentence must have a full
-  subject and verb
-- Conversational and human — should not read as automated
-- Count characters before outputting — must be under 300
-
----
-
-## LINKEDIN — Day 3+1 — First message after connection accepted
-
-### linkedin_message_1
-
-Generate the first LinkedIn direct message sent one day
-after the connection request is accepted.
-
-Rules:
-- 2-3 sentences maximum
-- Warm and conversational — this person just accepted
-  your connection, treat it as a human moment
-- Do not pitch Brevo by name or mention any features
-- Do not ask for a meeting or call in this message
-- Open with a natural thank you for connecting — but
-  pair it immediately with something specific
-- Reference vertical or resource.company as a relevance
-  signal — shows you work in their space
-- Use account_narrative as background context — do not
-  quote directly
-- End with an open door that invites a reply without
-  demanding one
-- Always use "I spend" not "Spend" — full subject and verb
-  on every sentence; never use an imperative or participial
-  sentence opener
-- No exclamation marks
-- Should feel like a message a thoughtful person wrote
-
----
-
-## EMAIL 2 — Day 7 — Case study email
-
-### subject_line_2
-
-Generate the subject line for email 2.
-
-If resource.industry matches vertical closely:
-  Use resource.company name + headline metric from
-  resource.key_metrics as the angle
-
-If resource.industry is adjacent but not exact match:
-  Use the metric only — drop the company name
-
-If resource.key_metrics is empty or weak:
-  Use a curiosity angle referencing vertical only
-
-Rules:
-- Maximum 6 words
-- No exclamation marks
-- No clickbait phrasing
-- Never start with "How to"
-- Conversational not salesy
-
----
-
-### email_2_paragraph_1
-
-Generate the opening paragraph of email 2.
-This paragraph connects their situation to the resource.
-
-Rules:
-- 2-3 sentences maximum
-- Do not open with "I wanted to share" or "I thought
-  you might find this interesting" — start specific
-- Connect company_name's situation to resource.company
-  in a way that feels earned — explain why they are
-  comparable without overstating it
-- Use account_narrative as context to find the connection
-- Use resource.context to understand what resource.company
-  was dealing with — do not quote directly
-- Match tone of email_1_paragraph_1 for consistency
-- Do not mention Brevo in this paragraph
-- Do not reveal the metrics yet
-
----
-
-### email_2_paragraph_2
-
-Generate the second and final body paragraph of email 2.
-This paragraph tells the case study story.
-
-Rules:
-- 3-4 sentences maximum
-- Must flow directly from email_2_paragraph_1
-- No reintroduction of the case study company
-- Tell the story in this order:
-    1. What resource.company was dealing with — 1 sentence
-    2. What changed and what the results were — 1-2
-       sentences, written as narrative not bullet points
-    3. How Brevo made it possible — 1 sentence
-- End with a sentence connecting the story back to
-  company_name — make it feel relevant not forced
-- This closing sentence leads naturally into the CTA
-  and serves as the anchor text for the booking link
-- Do not start this paragraph with "They"
-
----
-
-## EMAIL 3 — Day 12 — Report email
-
-### subject_line_3
-
-Generate the subject line for email 3.
-
-If resource.type is report or benchmark:
-  Lead with a data or finding angle — make it feel
-  like there is a specific number worth knowing
-
-If resource.type is ebook or guide:
-  Lead with an outcome or practical theme relevant
-  to vertical and job_title
-
-If neither applies:
-  Use a curiosity angle referencing vertical
-
-Rules:
-- Maximum 6 words
-- No exclamation marks
-- No clickbait
-- Never start with "How to"
-
----
-
-### email_3_paragraph_1
-
-Generate the first paragraph of email 3.
-Hook + report reference + key finding.
-
-Rules:
-- 2-3 sentences maximum
-- Should feel like a colleague sharing something
-  useful — not a marketing email pushing content
-- Reference resource.title naturally — do not open
-  with the title as the first words
-- Make relevance to vertical and job_title clear
-  without being heavy handed
-- Include one specific finding or stat from
-  resource.context — written as a sentence, not
-  a bullet point, not quoted directly
-- Do not include the CTA in this paragraph
-- Match tone of email_1_paragraph_1 for consistency
-
----
-
-### email_3_paragraph_2
-
-Generate the second and final paragraph of email 3.
-Relevance to their situation + CTA anchor sentence.
-
-Rules:
-- 2-3 sentences maximum
-- Must flow directly from email_3_paragraph_1
-- Connect the finding directly to company_name's
-  situation — make it feel relevant to their vertical
-  and job_title
-- Use account_narrative as context — do not quote
-- End with a sentence that naturally leads into the
-  CTA and serves as the anchor text for the booking
-  link — make the conversation feel like the obvious
-  next step
-
----
-
-## LINKEDIN — Day 13 — Second LinkedIn message
-
-### linkedin_message_2
-
-Generate the second and final LinkedIn direct message.
-This message leads with a metric and closes with a hook.
-
-Rules:
-- 2-3 sentences maximum
-- Lead with the strongest metric from
-  resource.key_metrics — write it as a sentence,
-  not a stat, not a bullet point
-- Connect the metric to company_name or vertical
-  in one sentence — make it feel relevant
-- Close with a direct but warm hook — an open
-  question or soft invitation, not a hard sell
-- Do not mention Brevo by name
-- Do not repeat anything from linkedin_message_1
-- No exclamation marks
-- Should feel like the natural last thing a
-  thoughtful person would say
-
----
-
-## EMAIL 4 — Day 18 — Breakup email
-
-### subject_line_4
-
-Generate the subject line for email 4.
-
-Rules:
-- Maximum 6 words
-- Soft, warm and human — not passive aggressive
-- No guilt-tripping language
-- Can use first_name if it fits naturally
-- Creates just enough warmth or curiosity to get
-  the open without overpromising
-
----
-
-### email_4_paragraph_1
-
-Generate the first paragraph of email 4.
-This is the breakup email — warm acknowledgement
-and binary choice.
-
-Rules:
-- 2-3 sentences maximum
-- Acknowledge no reply warmly — no guilt, no pressure
-- Offer a clear binary choice — not a priority right
-  now and I will stop, or worth a conversation
-- Do not pitch Brevo or any feature
-- Do not reference any specific email from the sequence
-- Do not start with "I just wanted to" or "I know
-  you're busy"
-- Keep it human — should feel like a person wrote it
-
----
-
-### email_4_paragraph_2
-
-Generate the second and final paragraph of email 4.
-This paragraph lands one last hook before the soft close.
-
-Rules:
-- 2-3 sentences maximum
-- Must flow directly from email_4_paragraph_1
-- Land one final hook — choose the strongest signal:
-    If resource.key_metrics is strong:
-      Reference the case study result as the hook —
-      one compelling number or outcome written as
-      a sentence not a stat
-    If resource.key_metrics is weak or empty:
-      Use a vertical observation as the hook —
-      something about what is shifting in the industry
-- Do not repitch Brevo features or products
-- End with a warm sentence that leaves the door open
-  and serves as the anchor text for the booking link
-- Should feel like the last thing a thoughtful
-  salesperson would say — not a desperate last push
-
----
-
 ## Selected resource
-
-Use the following resource as resource.* throughout your content generation.
 
 - resource.company: {resource.get('company')}
 - resource.title: {resource.get('title')}
@@ -496,15 +59,316 @@ Use the following resource as resource.* throughout your content generation.
 - resource.key_metrics: {resource.get('key_metrics')}
 - resource.context: {resource.get('context')}
 - resource.pain_points: {resource.get('pain_points')}
-- resource.brevo_features_tags: {resource.get('brevo_features_tags')}
+
+---
+
+## Global rules — apply to everything
+
+- Casual, human tone. Write at a 5th-grade reading level.
+  Slightly uncertain is better than confident and salesy.
+- Never use the word "brand" or "brands"
+- No exclamation marks
+- No dashes of any kind in email copy (em dash, en dash,
+  hyphen as pause). Restructure the sentence instead.
+  Dashes are allowed in LinkedIn content only.
+- Never start a sentence with "I just wanted to",
+  "I know you're busy", or "I hope this finds you well"
+- Do not quote input fields directly — use them as context
+- You:I ratio — write more "you/your" sentences than
+  "I/we/our" sentences in every email. Before outputting,
+  check the ratio. If you have more I/we sentences, rewrite.
+- One to two sentences per paragraph maximum.
+  Write for mobile — a desktop paragraph becomes
+  four lines on a phone.
+- Each complete email (all paragraphs combined) must be
+  75 to 125 words. Count before outputting. Cut if over.
+  Email 4 must be 50 to 80 words — short is the point.
+- CTA rule — the single most important rule:
+  Never ask for time or a meeting in a cold email.
+  Every CTA must be interest-based ("Is this on your
+  radar?") or offer-based ("Worth sending over?").
+  Save calendar asks for replies and active deals.
+  The CTA is always the last sentence and always serves
+  as the anchor text for a Lemlist template variable.
+- Never generate or include URLs —
+  {{cta_book_call}}, {{case_study_url}}, and {{report_url}}
+  are Lemlist variables. Write only the anchor text.
+- Metrics rule — never lead with ROI numbers.
+  Metrics first appear in email 2 as a story element.
+  They reappear in LinkedIn message 2 and email 4 only.
+  Email 1 and email 3 contain no metrics.
+- Never pitch Brevo features as a list. Brevo appears
+  once in email 1 (bridge sentence only), naturally in
+  email 2, and not at all in email 3 or email 4.
+
+---
+
+## EMAIL 1 — Day 1 — PAS framework (Problem, Agitate, Solve)
+
+### subject_line_1
+
+Rules:
+- 2 to 3 words maximum — internal-looking, not a headline
+- Neutral and specific — reads like a thread between
+  colleagues, not a marketing email
+- No verbs as the first word ("Improve", "Boost", "Scale")
+- No "your" as the first word
+- No questions, no punctuation at the end
+
+---
+
+### email_1_paragraph_1 — Problem
+
+One observation about company_name or their situation
+tied to a specific, likely pain. This is the hook.
+
+Rules:
+- 1 to 2 sentences
+- Must be about THEM, not about Brevo
+- Open with an observation, not an introduction
+- Use email_crm_activity and account_narrative as context
+  to make it specific — do not quote them directly
+- No Brevo mention
+- No metrics
+
+---
+
+### email_1_paragraph_2 — Agitate
+
+Expand why this problem is harder than it looks for
+a company like theirs.
+
+Rules:
+- 1 to 2 sentences
+- Flow directly from paragraph 1
+- No Brevo mention
+- No metrics
+- If esp_detected is present and esp_score >= 75:
+    Reference esp_detected by name and the specific
+    friction it creates at their scale
+  If esp_detected is present and esp_score < 75:
+    Reference the category of pain generically,
+    not the tool name
+  If esp_detected is null:
+    Use account_narrative to surface the friction
+    common to companies like theirs at this stage
+
+---
+
+### email_1_paragraph_3 — Solve (bridge only)
+
+One sentence naming Brevo as relevant to this pain.
+Then one sentence CTA — interest-based, not a meeting ask.
+
+Rules:
+- 2 sentences total, no more
+- Brevo appears once, as a bridge — not a product pitch
+- Shape the Brevo angle using signals:
+    has_loyalty_program = true: loyalty and CRM unification
+    needs_cdp = true: unified customer data view
+    has_wallet = true: wallet and channel integration
+    all false: email and CRM in one place
+- CTA anchor text wraps {{cta_book_call}}
+  Frame it as an interest question, not a meeting invite.
+  Example: "Is this something on your radar this year?"
+  or "Worth a conversation to see if it applies?"
+
+---
+
+## LINKEDIN — Day 3 — Connection request
+
+### linkedin_connection_note
+
+Rules:
+- Hard limit of 300 characters including spaces
+- Standalone — do not reference any email
+- No Brevo mention
+- Open with a specific observation about their vertical
+  or role — not a generic opener
+- Always use "I work with" not "working with"
+- Every sentence must have a subject and verb
+- Count characters before outputting
+
+---
+
+## LINKEDIN — Day 3+1 — First message after connection
+
+### linkedin_message_1
+
+Rules:
+- 2 to 3 sentences
+- Warm, human — they just connected, treat it as such
+- No Brevo mention, no meeting ask
+- Open with thanks for connecting then immediately
+  something specific about their space
+- Always use "I spend" not "Spend" — no imperative openers
+- End with an open question that invites a reply,
+  does not demand one
+
+---
+
+## EMAIL 2 — Day 7 — BAB framework (Before, After, Bridge)
+
+### subject_line_2
+
+Rules:
+- 2 to 3 words — neutral, internal-looking
+- If resource.industry closely matches vertical:
+    Reference resource.company name as the angle
+  If adjacent:
+    Neutral curiosity angle, no company name
+- No metrics in the subject line
+- No questions, no punctuation at the end
+
+---
+
+### email_2_paragraph_1 — Before
+
+Put company_name in the before state. This is their
+current situation — the problem they are living with.
+
+Rules:
+- 1 to 2 sentences
+- No Brevo mention
+- No metrics yet — save them for paragraph 2
+- Use account_narrative and resource.pain_points as
+  context to make the before state feel accurate
+- Connect their situation to resource.company naturally —
+  explain the parallel without overstating it
+
+---
+
+### email_2_paragraph_2 — After and Bridge
+
+Tell the case study story. Introduce the metric here
+for the first time. Bridge back to company_name.
+
+Rules:
+- 3 sentences maximum
+- Sentence 1: What resource.company changed (1 sentence)
+- Sentence 2: The result — write one metric from
+  resource.key_metrics as a narrative sentence, not
+  as a stat or bullet point. "X happened, which meant Y"
+  not "X% increase in Y"
+- Sentence 3: CTA — offer-based, wraps {{case_study_url}}
+  Example: "Worth seeing how they did it?" or
+  "The full story is here if it is useful"
+- Do not start this paragraph with "They"
+- Brevo can be mentioned naturally in sentence 1 or 2
+  as part of the story — not as a product pitch
+
+---
+
+## EMAIL 3 — Day 12 — Resource offer
+
+### subject_line_3
+
+Rules:
+- 2 to 3 words — neutral, internal-looking
+- Different angle from subject_line_2 — no overlap
+- No metrics in the subject line
+- If resource.type is report or benchmark:
+    Something that implies a finding worth knowing
+  If resource.type is ebook or guide:
+    Something that implies a practical outcome
+- No questions, no punctuation at the end
+
+---
+
+### email_3_paragraph_1 — Hook and finding
+
+One finding from resource.context that is relevant
+to their vertical and role. Different finding from
+what was used in email 2.
+
+Rules:
+- 1 to 2 sentences
+- No Brevo mention
+- No metrics from email 2 — use a different data point
+  or angle from resource.context
+- Should feel like a colleague sharing something useful,
+  not a marketing email pushing content
+- Reference resource.title naturally — do not open
+  with the title as the first words
+
+---
+
+### email_3_paragraph_2 — Relevance and offer
+
+Connect the finding to company_name. Close with
+an offer-based CTA.
+
+Rules:
+- 1 to 2 sentences
+- Flow directly from paragraph 1
+- No Brevo mention
+- CTA wraps {{report_url}} — offer the resource,
+  not a meeting. Example: "Want me to send it over?"
+  or "Happy to share the full version if useful"
+
+---
+
+## LINKEDIN — Day 13 — Second LinkedIn message
+
+### linkedin_message_2
+
+Rules:
+- 2 to 3 sentences
+- Lead with the strongest metric from resource.key_metrics
+  written as a narrative sentence — "X happened for Y"
+  not "X% increase"
+- Connect it to company_name or vertical in one sentence
+- Close with a warm open question — not a hard sell,
+  not a meeting ask
+- No Brevo mention
+- No repeat of linkedin_message_1
+
+---
+
+## EMAIL 4 — Day 18 — Breakup email
+
+### subject_line_4
+
+Rules:
+- 2 to 3 words — soft, warm, human
+- Can use first_name if it fits naturally
+- No guilt, no passive aggression
+
+---
+
+### email_4_paragraph_1 — Binary choice
+
+Rules:
+- 1 to 2 sentences
+- Acknowledge no reply without guilt or pressure
+- Offer a clear binary: not a priority right now
+  and I will stop, or worth a short conversation
+- No Brevo mention, no features
+
+---
+
+### email_4_paragraph_2 — Final hook and soft close
+
+Re-use the same metric from email 2 as the final hook,
+framed as what they would be leaving on the table.
+Then a soft door-open CTA.
+
+Rules:
+- 2 sentences maximum
+- Sentence 1: The metric from email 2, reframed as
+  an opportunity cost — "companies doing X are seeing Y"
+  written as a narrative, not a stat
+- Sentence 2: Soft CTA wrapping {{cta_book_call}} —
+  leave the door open without pressure
+  Example: "If the timing ever works, you can find
+  a time here" or "Here if it ever makes sense"
 
 ---
 
 ## Output format
 
-Return your response as a single JSON object with exactly
-these keys and no other text, no preamble, no markdown
-code fences:
+Return a single JSON object with exactly these keys.
+No preamble, no reasoning, no markdown fences.
 
 {{
   "subject_line_1": "",
