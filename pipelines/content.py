@@ -107,18 +107,35 @@ outbound sequence for one contact. Return everything as a single JSON object.
 
 ### subject_line_1
 
-Rules:
-- 2 to 3 words maximum
-- Reference either company_name's specific programme,
-  product, or channel setup OR the specific tension
-  their situation creates — not a generic topic label
-  Good: "Harrods Rewards data", "loyalty and in-store"
-  Bad: "loyalty data gaps", "CRM challenge"
-- Reads like a thread about something specific to them,
-  not a marketing email to anyone in their vertical
-- No verbs as the first word ("Improve", "Boost", "Scale")
-- No "your" as the first word
-- No questions, no punctuation at the end
+Format rules (apply to all four subject lines):
+- 2 to 6 words, all lowercase
+- No punctuation except ? and —
+- No first names
+- No verbs as the opening word
+- No superlatives or adjectives
+- Must read like an internal email between colleagues,
+  not a marketing email
+
+Signal priority — pick the first that applies:
+
+1. esp_detected is present AND is contact-based
+   (Mailchimp, Klaviyo, or similar):
+   → "paying per contact at [company_name]?"
+
+2. esp_detected is present (any other ESP):
+   → "[company_name]'s [esp_detected] setup"
+
+3. has_loyalty_program is true, no ESP detected:
+   → "[company_name]'s loyalty comms"
+
+4. needs_cdp is true:
+   → "fragmented data at [company_name]?"
+
+5. email_crm_activity is present:
+   → "your transactional email setup"
+
+6. No signals available:
+   → "question on your ESP"
 
 ---
 
@@ -216,17 +233,20 @@ Rules:
 
 ### subject_line_2
 
-Rules:
-- 2 to 3 words — neutral, internal-looking
-- Never use resource.company name — the prospect has
-  not heard of them yet and it reads as noise
-- Reference the specific outcome type from the case study:
-  what changed for the customer (the channel, the
-  behaviour, the retention dynamic)
-  Good: "wallet and repeat visits", "repeat purchase rates"
-  Bad: "The Kooples parallel", "case study results"
-- No metrics in the subject line
-- No questions, no punctuation at the end
+Different signal from subject_line_1 — skip whichever
+signal was already used. Signal priority:
+
+1. has_loyalty_program true AND has_wallet false:
+   → "loyalty + wallet — are they connected?"
+
+2. has_wallet true:
+   → "your rewards program emails"
+
+3. needs_cdp true (if not used in subject_line_1):
+   → "fragmented data at [company_name]?"
+
+4. Default:
+   → "transactional + marketing — one stack?"
 
 ---
 
@@ -271,15 +291,18 @@ Rules:
 
 ### subject_line_3
 
-Rules:
-- 2 to 3 words — neutral, internal-looking
-- Different angle from subject_line_2 — no overlap
-- Reference the specific tension or contrast in the
-  finding — what channel vs channel, what behaviour changed
-  Good: "wallet vs email retention", "loyalty benchmark data"
-  Bad: "wallet retention angle", "something useful"
-- No metrics in the subject line
-- No questions, no punctuation at the end
+Different signal from subject_line_1 and subject_line_2 —
+skip signals already used. Signal priority:
+
+1. has_loyalty_program true AND has_wallet false
+   (SMS gap angle, different from subject_line_2):
+   → "loyalty + SMS — are they connected?"
+
+2. Transactional angle (if not used in subject_line_2):
+   → "your transactional email setup"
+
+3. Default:
+   → "transactional + marketing — one stack?"
 
 ---
 
@@ -337,12 +360,12 @@ Rules:
 
 ### subject_line_4
 
-Rules:
-- 2 to 3 words — soft, warm, human
-- Use first_name naturally OR reference closing the loop
-  Good: "last one, Francesca", "still open", "closing loop"
-  Bad: "Still worth it, Francesca" (too long), "final email"
-- No guilt, no passive aggression
+Soft close — no signals needed. Pick the most natural:
+- "still open"
+- "last note"
+- "one more"
+
+No first names, no punctuation, 2 words max.
 
 ---
 
