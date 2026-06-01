@@ -108,9 +108,14 @@ outbound sequence for one contact. Return everything as a single JSON object.
 ### subject_line_1
 
 Rules:
-- 2 to 3 words maximum — internal-looking, not a headline
-- Neutral and specific — reads like a thread between
-  colleagues, not a marketing email
+- 2 to 3 words maximum
+- Reference either company_name's specific programme,
+  product, or channel setup OR the specific tension
+  their situation creates — not a generic topic label
+  Good: "Harrods Rewards data", "loyalty and in-store"
+  Bad: "loyalty data gaps", "CRM challenge"
+- Reads like a thread about something specific to them,
+  not a marketing email to anyone in their vertical
 - No verbs as the first word ("Improve", "Boost", "Scale")
 - No "your" as the first word
 - No questions, no punctuation at the end
@@ -213,10 +218,13 @@ Rules:
 
 Rules:
 - 2 to 3 words — neutral, internal-looking
-- If resource.industry closely matches vertical:
-    Reference resource.company name as the angle
-  If adjacent:
-    Neutral curiosity angle, no company name
+- Never use resource.company name — the prospect has
+  not heard of them yet and it reads as noise
+- Reference the specific outcome type from the case study:
+  what changed for the customer (the channel, the
+  behaviour, the retention dynamic)
+  Good: "wallet and repeat visits", "repeat purchase rates"
+  Bad: "The Kooples parallel", "case study results"
 - No metrics in the subject line
 - No questions, no punctuation at the end
 
@@ -266,11 +274,11 @@ Rules:
 Rules:
 - 2 to 3 words — neutral, internal-looking
 - Different angle from subject_line_2 — no overlap
+- Reference the specific tension or contrast in the
+  finding — what channel vs channel, what behaviour changed
+  Good: "wallet vs email retention", "loyalty benchmark data"
+  Bad: "wallet retention angle", "something useful"
 - No metrics in the subject line
-- If resource.type is report or benchmark:
-    Something that implies a finding worth knowing
-  If resource.type is ebook or guide:
-    Something that implies a practical outcome
 - No questions, no punctuation at the end
 
 ---
@@ -331,7 +339,9 @@ Rules:
 
 Rules:
 - 2 to 3 words — soft, warm, human
-- Can use first_name if it fits naturally
+- Use first_name naturally OR reference closing the loop
+  Good: "last one, Francesca", "still open", "closing loop"
+  Bad: "Still worth it, Francesca" (too long), "final email"
 - No guilt, no passive aggression
 
 ---
