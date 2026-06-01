@@ -6,7 +6,7 @@ from fastapi import APIRouter, BackgroundTasks
 
 from db.client import get_supabase, fetch_all
 from pipelines.qualification import run_crm_check, run_qualification_rules, run_technographic
-from pipelines.enrichment import submit_enrichment
+from pipelines.enrichment import submit_enrichment, run_prioritize
 from pipelines.content import submit_content
 from pipelines.monthly_batch import run_monthly_batch, push_batch_to_clay
 from utils.slack import notify
@@ -20,13 +20,24 @@ async def _run_daily_bg() -> None:
         crm     = await run_crm_check()
         rules   = await run_qualification_rules()
         tech    = await run_technographic()
-        enrich  = await submit_enrichment()
-        content = await submit_content()
+        enrich     = await submit_enrichment()
+        content    = await submit_content()
+        prioritize = await run_prioritize()
 
         # Pipeline health snapshot
         sb = get_supabase()
-        tam_rows = fetch_all("sourced_tam_v2", "market, crm_checked")
-        priority_count = sb.table("priority_tam").select("id", count="exact").execute().count or 0
+        tam_rows        = fetch_all("sourced_tam_v2", "market, crm_checked")
+        sourced_total   = sb.table("sourced_tam_v2").select("id", count="exact").execute().count or 0
+        qualified_total = sb.table("qualified_tam_v2").select("id", count="exact").execute().count or 0
+        tech_done       = (
+            sb.table("qualified_tam_v2").select("id", count="exact")
+            .not_.is_("esp_score", "null").execute().count or 0
+        )
+        enriched_done   = (
+            sb.table("qualified_tam_v2").select("id", count="exact")
+            .not_.is_("account_fit_score", "null").execute().count or 0
+        )
+        priority_count  = sb.table("priority_tam").select("id", count="exact").execute().count or 0
 
         market_stats: dict[str, dict] = {}
         for r in tam_rows:
@@ -75,12 +86,17 @@ async def _run_daily_bg() -> None:
             f"• Technographic: {tech_line}\n"
             f"• Enrichment: {enrich_line}\n"
             f"• Content: {content_line}\n"
-            f"• Priority TAM: {priority_count:,} companies ready"
+            f"• Priority TAM refreshed: {prioritize['prioritized']:,} companies\n"
+            f"\n*Pipeline health (qualified_tam_v2 → priority_tam):*\n"
+            f"  Step 1 — Qualified: {qualified_total:,} / {sourced_total:,}\n"
+            f"  Step 2 — Technographic: {tech_done:,} / {qualified_total:,}\n"
+            f"  Step 3 — AI enriched: {enriched_done:,} / {qualified_total:,}\n"
+            f"  Priority TAM (score ≥ 3): {priority_count:,} ready"
             f"{monthly_line}"
         )
         logger.info(
-            "daily_runner: complete — crm=%d newly_qualified=%d enrich=%d content=%d",
-            crm["processed"], rules["newly_qualified"], enrich["submitted"], content["submitted"],
+            "daily_runner: complete — crm=%d newly_qualified=%d enrich=%d content=%d prioritized=%d",
+            crm["processed"], rules["newly_qualified"], enrich["submitted"], content["submitted"], prioritize["prioritized"],
         )
     except Exception as exc:
         await notify(f"❌ *Daily pipeline failed* — `{exc}`", success=False)
