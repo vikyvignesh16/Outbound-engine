@@ -133,7 +133,10 @@ async def run_crm_check() -> dict:
 
     await asyncio.gather(*[fetch_one(r) for r in rows])
     logger.info("crm_check: wrote crm fields for %d domains", len(rows))
-    return {"status": "ok", "processed": len(rows)}
+    by_market = {}
+    for r in rows:
+        by_market[r["market"]] = by_market.get(r["market"], 0) + 1
+    return {"status": "ok", "processed": len(rows), "by_market": by_market}
 
 
 # ── Step 3: Qualification rules ───────────────────────────────────────────────
@@ -212,13 +215,17 @@ async def run_qualification_rules() -> dict:
             best[key] = r
     deduped = list(best.values())
 
+    before = sb.table("qualified_tam_v2").select("id", count="exact").execute().count or 0
+
     if deduped:
         for i in range(0, len(deduped), 100):
             chunk = deduped[i : i + 100]
             sb.table("qualified_tam_v2").upsert(chunk, on_conflict="domain,market").execute()
 
-    logger.info("qualification_rules: qualified=%d deduped=%d disqualified=%d", len(qualified_rows), len(deduped), disqualified)
-    return {"status": "ok", "qualified": len(deduped), "disqualified": disqualified}
+    after = sb.table("qualified_tam_v2").select("id", count="exact").execute().count or 0
+
+    logger.info("qualification_rules: qualified=%d deduped=%d disqualified=%d newly_added=%d", len(qualified_rows), len(deduped), disqualified, after - before)
+    return {"status": "ok", "qualified": len(deduped), "newly_qualified": after - before, "disqualified": disqualified}
 
 
 # ── Technographic API call ────────────────────────────────────────────────────

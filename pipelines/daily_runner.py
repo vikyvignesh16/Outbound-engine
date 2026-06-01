@@ -4,6 +4,7 @@ from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks
 
+from db.client import get_supabase, fetch_all
 from pipelines.qualification import run_crm_check, run_qualification_rules, run_technographic
 from pipelines.enrichment import submit_enrichment
 from pipelines.content import submit_content
@@ -21,6 +22,30 @@ async def _run_daily_bg() -> None:
         tech    = await run_technographic()
         enrich  = await submit_enrichment()
         content = await submit_content()
+
+        # Pipeline health snapshot
+        sb = get_supabase()
+        tam_rows = fetch_all("sourced_tam_v2", "market, crm_checked")
+        priority_count = sb.table("priority_tam").select("id", count="exact").execute().count or 0
+
+        market_stats: dict[str, dict] = {}
+        for r in tam_rows:
+            m = r["market"]
+            if m not in market_stats:
+                market_stats[m] = {"total": 0, "checked": 0}
+            market_stats[m]["total"] += 1
+            if r["crm_checked"]:
+                market_stats[m]["checked"] += 1
+
+        crm_lines = []
+        for market, s in sorted(market_stats.items()):
+            done = s["checked"] == s["total"]
+            suffix = " ✅" if done else ""
+            crm_lines.append(f"  ↳ {market}: {s['checked']:,} / {s['total']:,}{suffix}")
+
+        tech_line   = "0 pending (all covered ✅)" if tech["processed"] == 0   else f"+{tech['processed']:,} processed"
+        enrich_line = "0 pending (all covered ✅)" if enrich["submitted"] == 0  else f"{enrich['submitted']:,} submitted ({enrich['batches']} batches)"
+        content_line = "0 contacts pending"        if content["submitted"] == 0 else f"{content['submitted']:,} submitted ({content['batches']} batches)"
 
         monthly_line = ""
         if date.today().day == 1:
@@ -44,16 +69,18 @@ async def _run_daily_bg() -> None:
 
         await notify(
             f"✅ *Daily pipeline complete*\n"
-            f"• CRM checked: {crm['processed']} companies\n"
-            f"• Qualified: {rules['qualified']} companies\n"
-            f"• Technographic: {tech['processed']} companies\n"
-            f"• Submitted to enrichment: {enrich['submitted']} ({enrich['batches']} batches)\n"
-            f"• Submitted to content: {content['submitted']} contacts ({content['batches']} batches)"
+            f"• CRM checked today: +{crm['processed']:,} companies\n"
+            + "\n".join(crm_lines) + "\n"
+            f"• Newly qualified: +{rules['newly_qualified']:,} companies\n"
+            f"• Technographic: {tech_line}\n"
+            f"• Enrichment: {enrich_line}\n"
+            f"• Content: {content_line}\n"
+            f"• Priority TAM: {priority_count:,} companies ready"
             f"{monthly_line}"
         )
         logger.info(
-            "daily_runner: complete — crm=%d qualified=%d enrich=%d content=%d",
-            crm["processed"], rules["qualified"], enrich["submitted"], content["submitted"],
+            "daily_runner: complete — crm=%d newly_qualified=%d enrich=%d content=%d",
+            crm["processed"], rules["newly_qualified"], enrich["submitted"], content["submitted"],
         )
     except Exception as exc:
         await notify(f"❌ *Daily pipeline failed* — `{exc}`", success=False)
