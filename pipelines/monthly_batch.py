@@ -106,7 +106,7 @@ async def push_batch_to_clay(batch_number: int) -> dict:
         "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
         "esp_detected, esp_score, account_fit_score, account_narrative, "
         "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp, "
-        "batch_month",
+        "batch_number, batch_month",
         filters=[("eq", "batch_number", batch_number), ("is_", "clay_pushed_at", "null")],
     )
 
