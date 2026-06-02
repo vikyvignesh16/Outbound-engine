@@ -4,7 +4,7 @@ import logging
 import os
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from db.client import get_supabase, fetch_all
 
@@ -91,11 +91,11 @@ async def get_brevo_company(domain: str, client: httpx.AsyncClient) -> dict | No
 
 # ── Step 2: CRM check ─────────────────────────────────────────────────────────
 
-async def run_crm_check() -> dict:
+async def run_crm_check(limit: int = 1000) -> dict:
     """
-    Fetches up to 1000 unchecked rows per market from sourced_tam_v2,
+    Fetches up to `limit` unchecked rows per market from sourced_tam_v2,
     calls Brevo CRM API per domain, writes CRM fields back, and marks
-    crm_checked=true. Runs daily — full TAM covered in ~15 days.
+    crm_checked=true. Default limit=1000 for daily runs; pass higher to clear backlog.
     """
     sb = get_supabase()
     rows = []
@@ -103,7 +103,7 @@ async def run_crm_check() -> dict:
         batch = fetch_all(
             "sourced_tam_v2", "domain, market",
             [("eq", "market", market), ("eq", "crm_checked", False)],
-            limit=1000,
+            limit=limit,
         )
         rows.extend(batch)
 
@@ -309,3 +309,13 @@ async def run_qualification():
     rules = await run_qualification_rules()
     tech = await run_technographic()
     return {"crm": crm, "rules": rules, "technographic": tech}
+
+
+@router.post("/pipelines/crm-check")
+async def crm_check_endpoint(limit: int = 1000):
+    """Run CRM check only, with optional limit override. Use limit=10000 to clear backlog."""
+    try:
+        return await run_crm_check(limit=limit)
+    except Exception as exc:
+        logger.exception("crm_check_endpoint: failed")
+        raise HTTPException(status_code=500, detail=str(exc))
