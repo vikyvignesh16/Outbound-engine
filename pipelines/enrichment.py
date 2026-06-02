@@ -94,7 +94,7 @@ following:
            layer of their own
          · No verifiable digital presence or business identity
          · Geographic mismatch — company is clearly not based in
-           the UK or Ireland (e.g. operating solely in the US, Asia,
+           Europe (e.g. operating solely in the US, Asia,
            Australia, or other non-target markets)
 
 5. Does the company have a digital wallet or payment wallet product?
