@@ -4,7 +4,7 @@ import logging
 import os
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from db.client import get_supabase, fetch_all
 
@@ -309,10 +309,20 @@ async def run_qualification():
 
 
 @router.post("/pipelines/crm-check")
-async def crm_check_endpoint(limit: int = 1000):
-    """Run CRM check only, with optional limit override. Use limit=10000 to clear backlog."""
-    try:
-        return await run_crm_check(limit=limit)
-    except Exception as exc:
-        logger.exception("crm_check_endpoint: failed")
-        raise HTTPException(status_code=500, detail=str(exc))
+async def crm_check_endpoint(background_tasks: BackgroundTasks, limit: int = 1000):
+    """Run CRM check in background. Use limit=10000 to clear backlog."""
+    async def _run():
+        from utils.slack import notify
+        try:
+            result = await run_crm_check(limit=limit)
+            await notify(
+                f"✅ *CRM check complete*\n"
+                f"• Processed: {result['processed']:,} companies\n"
+                + "\n".join(f"  ↳ {m}: {c:,}" for m, c in result.get("by_market", {}).items())
+            )
+        except Exception as exc:
+            from utils.slack import notify
+            await notify(f"❌ *CRM check failed* — `{exc}`", success=False)
+            logger.exception("crm_check_endpoint: failed")
+    background_tasks.add_task(_run)
+    return {"status": "started", "limit": limit}
