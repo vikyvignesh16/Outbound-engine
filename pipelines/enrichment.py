@@ -374,9 +374,8 @@ async def process_all_pending() -> dict:
     """
     Polls all pending enrichment batches.
     If any are still processing, returns still_pending count.
-    Once all complete, runs prioritize then dbt tests.
+    Once all complete, runs prioritize.
     """
-    from pipelines.dbt_runner import run_dbt_tests
     from utils.slack import notify
 
     try:
@@ -397,7 +396,6 @@ async def process_all_pending() -> dict:
                 "processed": 0,
                 "still_pending": 0,
                 "prioritize": None,
-                "dbt": None,
             }
 
         still_pending = 0
@@ -417,12 +415,10 @@ async def process_all_pending() -> dict:
                 "still_pending":  still_pending,
                 "total_enriched": total_enriched,
                 "prioritize":     None,
-                "dbt":            None,
             }
 
-        # All batches done — run prioritize then dbt
+        # All batches done — run prioritize
         prioritize_result = await run_prioritize()
-        dbt_result = run_dbt_tests()
 
         # Build score + ESP breakdown from DB
         score_rows = (
@@ -447,14 +443,12 @@ async def process_all_pending() -> dict:
         top_esp = sorted(esp_counts.items(), key=lambda x: x[1], reverse=True)[:5]
         esp_line = " | ".join(f"{e} {c}" for e, c in top_esp)
 
-        dbt_status = "✅ passed" if dbt_result["passed"] else "❌ failed"
         await notify(
             f"✅ *Enrichment complete*\n"
             f"• Enriched: {total_enriched} companies\n"
             f"• Fit scores: {score_line}\n"
             f"• ESP detected: {esp_line or 'none'}\n"
-            f"• Priority TAM: {prioritize_result['prioritized']} companies pushed\n"
-            f"• dbt: {dbt_status}"
+            f"• Priority TAM: {prioritize_result['prioritized']} companies pushed"
         )
 
         return {
@@ -463,7 +457,6 @@ async def process_all_pending() -> dict:
             "still_pending":  0,
             "total_enriched": total_enriched,
             "prioritize":     prioritize_result,
-            "dbt":            dbt_result,
         }
 
     except Exception as exc:
