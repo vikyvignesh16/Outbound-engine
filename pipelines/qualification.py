@@ -98,14 +98,11 @@ async def run_crm_check(limit: int = 1000) -> dict:
     crm_checked=true. Default limit=1000 for daily runs; pass higher to clear backlog.
     """
     sb = get_supabase()
-    rows = []
-    for market in ["UK", "Ireland"]:
-        batch = fetch_all(
-            "sourced_tam_v2", "domain, market",
-            [("eq", "market", market), ("eq", "crm_checked", False)],
-            limit=limit,
-        )
-        rows.extend(batch)
+    rows = fetch_all(
+        "sourced_tam_v2", "domain, market",
+        [("eq", "crm_checked", False)],
+        limit=limit,
+    )
 
     if not rows:
         logger.info("crm_check: no unchecked rows remaining")
