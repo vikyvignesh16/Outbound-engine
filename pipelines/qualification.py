@@ -176,8 +176,12 @@ async def run_qualification_rules() -> dict:
         "id, domain, market, company_name, company_type, employee_range, "
         "location, country, linkedin_url, vertical, "
         "brevo_company_id, planhat_id, open_deals, deal_lost_date",
-        [("eq", "crm_checked", True)],
+        [("eq", "crm_checked", True), ("eq", "qualification_checked", False)],
     )
+
+    if not rows:
+        logger.info("qualification_rules: no unprocessed rows")
+        return {"status": "ok", "qualified": 0, "newly_qualified": 0, "disqualified": 0}
 
     qualified_rows = []
     disqualified = 0
@@ -220,6 +224,11 @@ async def run_qualification_rules() -> dict:
             sb.rpc("upsert_qualified_tam_v2", {"p_rows": chunk}).execute()
 
     after = sb.table("qualified_tam_v2").select("id", count="exact").execute().count or 0
+
+    # Mark all processed rows so they are not re-evaluated on future runs
+    processed_ids = [row["id"] for row in rows]
+    for i in range(0, len(processed_ids), 100):
+        sb.table("sourced_tam_v2").update({"qualification_checked": True}).in_("id", processed_ids[i : i + 100]).execute()
 
     logger.info("qualification_rules: qualified=%d deduped=%d disqualified=%d newly_added=%d", len(qualified_rows), len(deduped), disqualified, after - before)
     return {"status": "ok", "qualified": len(deduped), "newly_qualified": after - before, "disqualified": disqualified}
