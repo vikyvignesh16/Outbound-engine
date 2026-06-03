@@ -64,13 +64,22 @@ outbound sequence for one contact. Return everything as a single JSON object.
 
 ## Global rules — apply to everything
 
+DASHES — ABSOLUTE RULE. Zero tolerance.
+  Never use em dash (—), en dash (–), or a hyphen as a
+  pause or connector in any sentence in any email or
+  LinkedIn content. This includes constructions like
+  "X — Y", "X – Y", or "fast-growing" used as a pause.
+  If you are tempted to use a dash, rewrite the sentence
+  as two separate sentences or use a comma instead.
+  Wrong: "They run loyalty and wallet — two systems."
+  Right: "They run loyalty and wallet through two systems."
+  Scan your output before returning. If you find a dash,
+  rewrite that sentence.
+
 - Casual, human tone. Write at a 5th-grade reading level.
   Slightly uncertain is better than confident and salesy.
 - Never use the word "brand" or "brands"
 - No exclamation marks
-- No dashes of any kind in email copy (em dash, en dash,
-  hyphen as pause). Restructure the sentence instead.
-  Dashes are allowed in LinkedIn content only.
 - Never start a sentence with "I just wanted to",
   "I know you're busy", or "I hope this finds you well"
 - Do not quote input fields directly — use them as context
@@ -95,7 +104,7 @@ outbound sequence for one contact. Return everything as a single JSON object.
   are Lemlist variables. Write only the anchor text.
 - Metrics rule — never lead with ROI numbers.
   Metrics first appear in email 2 as a story element.
-  They reappear in LinkedIn message 2 and email 4 only.
+  They reappear in linkedin_message_2 and email 4 only.
   Email 1 and email 3 contain no metrics.
 - Never pitch Brevo features as a list. Brevo appears
   once in email 1 (bridge sentence only), naturally in
@@ -139,19 +148,34 @@ Signal priority — pick the first that applies:
 
 ---
 
-### email_1_paragraph_1 — Problem
+### email_1_paragraph_1 — Observed signal hook
 
-One observation about company_name or their situation
-tied to a specific, likely pain. This is the hook.
+Open with something specific you noticed about them,
+drawn from their signals. This is what makes it feel
+researched, not templated.
 
 Rules:
 - 1 to 2 sentences
 - Must be about THEM, not about Brevo
-- Open with an observation, not an introduction
-- Use email_crm_activity and account_narrative as context
-  to make it specific — do not quote them directly
+- Reference one of their signals directly as an observation:
+    If esp_detected: reference the ESP by name and what
+      that likely means for their sending volume at scale
+      (use approximate language: "sending at volume",
+      "a lot of transactional sends", "thousands of
+      contacts" — never exact numbers)
+    If has_loyalty_program: reference what running a
+      loyalty programme at their scale means for comms
+      volume (approximate language only)
+    If has_wallet: reference what wallet activity implies
+      about their transactional send volume
+    If email_crm_activity: use it as the specific
+      observation — paraphrase, never quote directly
+    If no signals: use account_narrative to surface
+      something specific about their communication layer
 - No Brevo mention
 - No metrics
+- Do not open with "I noticed" or "I saw" — instead open
+  with the observation itself as a statement of fact
 
 ---
 
@@ -197,33 +221,21 @@ Rules:
 
 ---
 
-## LINKEDIN — Day 3 — Connection request
-
-### linkedin_connection_note
-
-Rules:
-- Hard limit of 300 characters including spaces
-- Standalone — do not reference any email
-- No Brevo mention
-- Open with a specific observation about their vertical
-  or role — not a generic opener
-- Always use "I work with" not "working with"
-- Every sentence must have a subject and verb
-- Count characters before outputting
-
----
-
-## LINKEDIN — Day 3+1 — First message after connection
+## LINKEDIN — Day 3 — Direct message (no connection note)
 
 ### linkedin_message_1
+
+Send directly after connecting — no note on the
+connection request itself.
 
 Rules:
 - 2 to 3 sentences
 - Warm, human — they just connected, treat it as such
 - No Brevo mention, no meeting ask
-- Open with thanks for connecting then immediately
-  something specific about their space
-- Always use "I spend" not "Spend" — no imperative openers
+- Open with something specific about their vertical
+  or role, not a generic opener
+- Always use "I work with" not "working with"
+- Every sentence must have a subject and verb
 - End with an open question that invites a reply,
   does not demand one
 
@@ -287,7 +299,12 @@ Rules:
 
 ---
 
-## EMAIL 3 — Day 12 — Resource offer
+## EMAIL 3 — Day 12 — New pain point + resource
+
+This email must NOT feel like a follow-up or a
+content push. It surfaces a different pain from
+emails 1 and 2, then offers the resource as genuinely
+useful context for that pain.
 
 ### subject_line_3
 
@@ -306,32 +323,37 @@ skip signals already used. Signal priority:
 
 ---
 
-### email_3_paragraph_1 — Hook and finding
+### email_3_paragraph_1 — New pain point
 
-One finding from resource.context that is relevant
-to their vertical and role. Different finding from
-what was used in email 2.
+Surface a pain that was NOT covered in emails 1 or 2.
+Draw from signals not yet used:
+- If email 1 used ESP angle: use loyalty, wallet,
+  or CDP angle here
+- If email 1 used loyalty: use transactional or
+  deliverability angle here
+- If no unused signals: use a pain common to their
+  vertical drawn from account_narrative
 
 Rules:
 - 1 to 2 sentences
+- Write as an observation about their situation,
+  not a pitch
 - No Brevo mention
-- No metrics from email 2 — use a different data point
-  or angle from resource.context
-- Should feel like a colleague sharing something useful,
-  not a marketing email pushing content
-- Reference resource.title naturally — do not open
-  with the title as the first words
+- No metrics
 
 ---
 
-### email_3_paragraph_2 — Relevance and offer
+### email_3_paragraph_2 — Resource as context
 
-Connect the finding to company_name. Close with
-an offer-based CTA.
+Connect the pain from paragraph 1 to resource.title
+as something relevant, then close with an offer CTA.
 
 Rules:
 - 1 to 2 sentences
-- Flow directly from paragraph 1
+- Frame the resource as useful context for the pain,
+  not as "here is a piece of content"
+- Reference resource.title naturally — do not open
+  with the title as the first words
 - No Brevo mention
 - CTA wraps {{report_url}} — offer the resource,
   not a meeting. Example: "Want me to send it over?"
@@ -339,9 +361,12 @@ Rules:
 
 ---
 
-## LINKEDIN — Day 13 — Second LinkedIn message
+## LINKEDIN — Day 13 — First message after connection
 
 ### linkedin_message_2
+
+This is the first message sent after they accept the
+connection — warm, not a pitch.
 
 Rules:
 - 2 to 3 sentences
@@ -352,7 +377,6 @@ Rules:
 - Close with a warm open question — not a hard sell,
   not a meeting ask
 - No Brevo mention
-- No repeat of linkedin_message_1
 
 ---
 
@@ -408,7 +432,6 @@ No preamble, no reasoning, no markdown fences.
   "email_1_paragraph_1": "",
   "email_1_paragraph_2": "",
   "email_1_paragraph_3": "",
-  "linkedin_connection_note": "",
   "linkedin_message_1": "",
   "subject_line_2": "",
   "email_2_paragraph_1": "",
