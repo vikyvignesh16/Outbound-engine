@@ -204,10 +204,10 @@ async def run_qualification_rules() -> dict:
         else:
             disqualified += 1
 
-    # keep only the highest sourced_tam_id row per (domain, market, company_name)
+    # keep only the highest sourced_tam_id row per (domain, market)
     best: dict[tuple, dict] = {}
     for r in qualified_rows:
-        key = (r["domain"], r["market"], r.get("company_name"))
+        key = (r["domain"], r["market"])
         if key not in best or r["sourced_tam_id"] > best[key]["sourced_tam_id"]:
             best[key] = r
     deduped = list(best.values())
@@ -217,7 +217,7 @@ async def run_qualification_rules() -> dict:
     if deduped:
         for i in range(0, len(deduped), 100):
             chunk = deduped[i : i + 100]
-            sb.table("qualified_tam_v2").upsert(chunk, on_conflict="domain,market,company_name").execute()
+            sb.table("qualified_tam_v2").upsert(chunk, on_conflict="domain,market").execute()
 
     after = sb.table("qualified_tam_v2").select("id", count="exact").execute().count or 0
 
