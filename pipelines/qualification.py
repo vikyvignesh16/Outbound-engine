@@ -236,17 +236,30 @@ async def run_qualification_rules() -> dict:
 
 # ── Technographic API call ────────────────────────────────────────────────────
 
+def _select_esp_list(data: dict) -> list[dict]:
+    """
+    Prefers BuiltWith client-side detection (tech_stack.crm, 180-day recency)
+    over DNS-based detection (esp_detection.services_detected).
+    DNS records are often 6-12 months stale post-migration.
+    """
+    crm_tools = (data.get("tech_stack") or {}).get("crm") or []
+    crm_as_dicts = [{"name": t} for t in crm_tools if t and t.lower() != "unknown"]
+    if crm_as_dicts:
+        return crm_as_dicts
+    dns_services = (data.get("esp_detection") or {}).get("services_detected") or []
+    return [{"name": s} for s in dns_services if s and s.lower() != "unknown"]
+
+
 async def get_techstack(domain: str, client: httpx.AsyncClient) -> dict:
     """Calls the Technographic API with exponential backoff on 500 errors."""
-    url = f"{TECHNOGRAPHIC_BASE_URL}/api/techstack"
+    url = f"{TECHNOGRAPHIC_BASE_URL}/v1/data-enrichment/domain-analysis"
     headers = {"X-API-Key": os.environ["TECHNOGRAPHIC_API_KEY"]}
-    params = {"domain": domain, "mode": "smart"}
 
     for attempt, wait in enumerate([0, 1, 2, 4]):
         if wait:
             await asyncio.sleep(wait)
         try:
-            resp = await client.get(url, headers=headers, params=params, timeout=30.0)
+            resp = await client.post(url, headers=headers, json={"domain": domain}, timeout=30.0)
             if resp.status_code == 500 and attempt < 3:
                 logger.warning("techstack: 500 for %s, retrying (attempt %d)", domain, attempt + 1)
                 continue
@@ -282,7 +295,7 @@ async def run_technographic() -> dict:
             try:
                 async with httpx.AsyncClient() as client:
                     data = await get_techstack(domain, client)
-                esp_list = data.get("esp", [])
+                esp_list = _select_esp_list(data)
                 return {
                     "domain":       domain,
                     "market":       row["market"],
