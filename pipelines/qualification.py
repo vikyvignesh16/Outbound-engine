@@ -309,12 +309,26 @@ async def run_technographic() -> dict:
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("/pipelines/qualify")
-async def run_qualification():
-    """Runs Steps 2-4: CRM check → qualification rules → technographic enrichment."""
-    crm = await run_crm_check()
-    rules = await run_qualification_rules()
-    tech = await run_technographic()
-    return {"crm": crm, "rules": rules, "technographic": tech}
+async def run_qualification(background_tasks: BackgroundTasks):
+    """Runs Steps 2-4 in background: CRM check → qualification rules → technographic."""
+    async def _run():
+        from utils.slack import notify
+        try:
+            crm = await run_crm_check()
+            rules = await run_qualification_rules()
+            tech = await run_technographic()
+            await notify(
+                f"✅ *Qualify pipeline complete*\n"
+                f"• CRM checked: +{crm['processed']:,}\n"
+                f"• Newly qualified: +{rules['newly_qualified']:,} | disqualified: {rules['disqualified']:,}\n"
+                f"• Technographic: {tech['processed']:,} processed"
+            )
+        except Exception as exc:
+            from utils.slack import notify
+            await notify(f"❌ *Qualify pipeline failed* — `{exc}`", success=False)
+            logger.exception("qualify: failed")
+    background_tasks.add_task(_run)
+    return {"status": "started"}
 
 
 @router.post("/pipelines/crm-check")
