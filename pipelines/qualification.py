@@ -217,7 +217,7 @@ async def run_qualification_rules() -> dict:
     if deduped:
         for i in range(0, len(deduped), 100):
             chunk = deduped[i : i + 100]
-            sb.rpc("upsert_qualified_tam_v2", {"p_rows": json.dumps(chunk)}).execute()
+            sb.rpc("upsert_qualified_tam_v2", {"p_rows": chunk}).execute()
 
     after = sb.table("qualified_tam_v2").select("id", count="exact").execute().count or 0
 
