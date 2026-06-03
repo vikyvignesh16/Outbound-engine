@@ -11,7 +11,7 @@ from db.client import get_supabase, fetch_all
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-TECHNOGRAPHIC_BASE_URL = "http://t8kcgcskw0g0oco0g0ckwsgo.77.42.64.109.sslip.io"
+TECHNOGRAPHIC_BASE_URL = "https://data-ai-gen-public.brevo.tech"
 BREVO_CRM_BASE_URL = "https://api.brevo.com/v3"
 
 # (keywords, score) — checked in order; first match wins per ESP entry
@@ -236,16 +236,32 @@ async def run_qualification_rules() -> dict:
 
 # ── Technographic API call ────────────────────────────────────────────────────
 
+def _filter_builtwith_crm(data: dict) -> list[dict]:
+    """
+    Extracts recognized ESPs from BuiltWith's tech_stack.crm, filtering out:
+    - Entries with "SPF" in the name (DNS artifacts BuiltWith surfaces in the CRM list)
+    - Tools that don't match our known ESP scoring table (Slack, Office 365, etc.)
+    Only tools with an explicit score in COMPETITOR_ESP_SCORES are kept.
+    """
+    crm_tools = (data.get("tech_stack") or {}).get("crm") or []
+    return [
+        {"name": t} for t in crm_tools
+        if t
+        and t.lower() != "unknown"
+        and "spf" not in t.lower()
+        and _score_one_esp(t) != _DEFAULT_ESP_SCORE
+    ]
+
+
 def _select_esp_list(data: dict) -> list[dict]:
     """
     Prefers BuiltWith client-side detection (tech_stack.crm, 180-day recency)
     over DNS-based detection (esp_detection.services_detected).
     DNS records are often 6-12 months stale post-migration.
     """
-    crm_tools = (data.get("tech_stack") or {}).get("crm") or []
-    crm_as_dicts = [{"name": t} for t in crm_tools if t and t.lower() != "unknown"]
-    if crm_as_dicts:
-        return crm_as_dicts
+    builtwith = _filter_builtwith_crm(data)
+    if builtwith:
+        return builtwith
     dns_services = (data.get("esp_detection") or {}).get("services_detected") or []
     return [{"name": s} for s in dns_services if s and s.lower() != "unknown"]
 
@@ -253,7 +269,7 @@ def _select_esp_list(data: dict) -> list[dict]:
 async def get_techstack(domain: str, client: httpx.AsyncClient) -> dict:
     """Calls the Technographic API with exponential backoff on 500 errors."""
     url = f"{TECHNOGRAPHIC_BASE_URL}/v1/data-enrichment/domain-analysis"
-    headers = {"X-API-Key": os.environ["TECHNOGRAPHIC_API_KEY"]}
+    headers = {}  # public endpoint — no auth required
 
     for attempt, wait in enumerate([0, 1, 2, 4]):
         if wait:
@@ -323,9 +339,8 @@ async def run_technographic() -> dict:
 
 def _builtwith_primary_esp(data: dict) -> str | None:
     """Returns the highest-scored ESP from BuiltWith CRM list only — no DNS fallback."""
-    crm_tools = (data.get("tech_stack") or {}).get("crm") or []
-    crm_as_dicts = [{"name": t} for t in crm_tools if t and t.lower() != "unknown"]
-    return get_primary_esp(crm_as_dicts) if crm_as_dicts else None
+    filtered = _filter_builtwith_crm(data)
+    return get_primary_esp(filtered) if filtered else None
 
 
 async def run_technographic_compare() -> dict:
