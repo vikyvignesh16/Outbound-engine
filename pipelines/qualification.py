@@ -319,6 +319,62 @@ async def run_technographic() -> dict:
     return {"status": "ok", "processed": len(enriched)}
 
 
+# ── Step 4b: Technographic comparison (BuiltWith vs DNS) ─────────────────────
+
+def _builtwith_primary_esp(data: dict) -> str | None:
+    """Returns the highest-scored ESP from BuiltWith CRM list only — no DNS fallback."""
+    crm_tools = (data.get("tech_stack") or {}).get("crm") or []
+    crm_as_dicts = [{"name": t} for t in crm_tools if t and t.lower() != "unknown"]
+    return get_primary_esp(crm_as_dicts) if crm_as_dicts else None
+
+
+async def run_technographic_compare() -> dict:
+    """
+    Calls the new technographic endpoint for already-processed rows (esp_score IS NOT NULL)
+    and writes only esp_detected_builtwith — never touches esp_detected or esp_score.
+    Run once to build the comparison dataset; re-running is safe (skips already-filled rows).
+    """
+    sb = get_supabase()
+    rows = fetch_all(
+        "qualified_tam_v2",
+        "domain, market",
+        [("not_.is_", "esp_score", "null"), ("is_", "esp_detected_builtwith", "null")],
+    )
+
+    if not rows:
+        logger.info("techstack_compare: no rows to process")
+        return {"status": "ok", "processed": 0}
+
+    logger.info("techstack_compare: processing %d domains", len(rows))
+    semaphore = asyncio.Semaphore(25)
+
+    async def fetch_one(row: dict) -> dict | None:
+        domain = row["domain"]
+        async with semaphore:
+            try:
+                async with httpx.AsyncClient() as client:
+                    data = await get_techstack(domain, client)
+                return {
+                    "domain":    domain,
+                    "market":    row["market"],
+                    "builtwith": _builtwith_primary_esp(data),
+                }
+            except Exception as exc:
+                logger.error("techstack_compare: failed for %s: %s", domain, exc)
+                return None
+
+    results = await asyncio.gather(*[fetch_one(r) for r in rows])
+    enriched = [r for r in results if r is not None]
+
+    for result in enriched:
+        sb.table("qualified_tam_v2").update({
+            "esp_detected_builtwith": result["builtwith"],
+        }).eq("domain", result["domain"]).eq("market", result["market"]).execute()
+
+    logger.info("techstack_compare: wrote %d results", len(enriched))
+    return {"status": "ok", "processed": len(enriched)}
+
+
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("/pipelines/qualify")
@@ -340,6 +396,25 @@ async def run_qualification(background_tasks: BackgroundTasks):
             from utils.slack import notify
             await notify(f"❌ *Qualify pipeline failed* — `{exc}`", success=False)
             logger.exception("qualify: failed")
+    background_tasks.add_task(_run)
+    return {"status": "started"}
+
+
+@router.post("/pipelines/technographic-compare")
+async def technographic_compare_endpoint(background_tasks: BackgroundTasks):
+    """Fills esp_detected_builtwith for already-processed rows. Non-destructive comparison run."""
+    async def _run():
+        from utils.slack import notify
+        try:
+            result = await run_technographic_compare()
+            await notify(
+                f"✅ *Technographic compare complete*\n"
+                f"• Processed: {result['processed']:,} rows\n"
+                f"• esp_detected_builtwith now populated — run comparison query to see delta"
+            )
+        except Exception as exc:
+            await notify(f"❌ *Technographic compare failed* — `{exc}`", success=False)
+            logger.exception("technographic_compare_endpoint: failed")
     background_tasks.add_task(_run)
     return {"status": "started"}
 
