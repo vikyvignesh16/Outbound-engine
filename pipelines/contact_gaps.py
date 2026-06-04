@@ -89,34 +89,57 @@ def _update_campaign_counts(domain: str, batch_number: int, count: int, source: 
 # ── Gap detection ──────────────────────────────────────────────────────────────
 
 def detect_gaps(batch_number: int) -> int:
-    """Find domains in batch with 0 sourced contacts. Writes pending rows to contact_gaps."""
+    """Find domains in batch with no contacts yet (across both sourced_contacts
+    and phantombuster_contacts) and insert pending rows in contact_gaps.
+
+    Idempotent: companies that already have a row in contact_gaps for this batch
+    are left untouched, regardless of their current phantombuster_status.  This
+    is important because the day-2 monthly cron may fire multiple times when
+    re-deploys happen, and we never want to reset terminal rows back to pending
+    (would cause PB to re-scrape and burn credits)."""
     batch_rows = fetch_all(
         "campaign_batches", "domain,company_name,market",
         filters=[("eq", "batch_number", batch_number)],
     )
     contacted = {
         r["domain"]
-        for r in fetch_all(
-            "sourced_contacts", "domain",
-            filters=[("eq", "batch_number", batch_number)],
-        )
+        for r in fetch_all("sourced_contacts", "domain",
+                           filters=[("eq", "batch_number", batch_number)])
     }
-    gaps = [r for r in batch_rows if r["domain"] not in contacted]
+    pb_seen = {
+        r["domain"]
+        for r in fetch_all("phantombuster_contacts", "domain",
+                           filters=[("eq", "batch_number", batch_number)])
+    }
+    already_tracked = {
+        r["domain"]
+        for r in fetch_all("contact_gaps", "domain",
+                           filters=[("eq", "batch_number", batch_number)])
+    }
+    gaps = [
+        r for r in batch_rows
+        if r["domain"] not in contacted
+        and r["domain"] not in pb_seen
+        and r["domain"] not in already_tracked
+    ]
     if not gaps:
         return 0
 
     sb = get_supabase()
-    for gap in gaps:
-        sb.table("contact_gaps").upsert({
-            "domain":               gap["domain"],
-            "company_name":         gap.get("company_name"),
-            "market":               gap.get("market"),
+    # Insert (not upsert) — `already_tracked` guards us against conflicts so the
+    # phantombuster_status of existing rows is never overwritten.
+    for i in range(0, len(gaps), 100):
+        chunk = [{
+            "domain":               g["domain"],
+            "company_name":         g.get("company_name"),
+            "market":               g.get("market"),
             "batch_number":         batch_number,
             "gap_reason":           "no_contacts",
             "phantombuster_status": "pending",
-        }, on_conflict="domain,batch_number").execute()
+        } for g in gaps[i:i+100]]
+        sb.table("contact_gaps").insert(chunk).execute()
 
-    logger.info("contact_gaps: detected %d gaps for batch %d", len(gaps), batch_number)
+    logger.info("contact_gaps: detected %d new gaps for batch %d", len(gaps), batch_number)
     return len(gaps)
 
 
@@ -128,7 +151,7 @@ def run_phase1(batch_number: int) -> int:
     slot; launching all pending at once trips the workspace limit and silently fails."""
     in_flight = fetch_all(
         "contact_gaps", "id",
-        filters=[("in", "phantombuster_status", "(extracting_company,scraping_contacts)")],
+        filters=[("in_", "phantombuster_status", ["extracting_company", "scraping_contacts"])],
         limit=1,
     )
     if in_flight:
@@ -267,7 +290,7 @@ def run_phase2() -> int:
     in flight (same parallel-slot constraint as run_phase1)."""
     in_flight = fetch_all(
         "contact_gaps", "id",
-        filters=[("in", "phantombuster_status", "(extracting_company,scraping_contacts)")],
+        filters=[("in_", "phantombuster_status", ["extracting_company", "scraping_contacts"])],
         limit=1,
     )
     if in_flight:
