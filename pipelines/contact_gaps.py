@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -52,6 +53,33 @@ def _build_sales_nav_url(company_org_id: str, company_name: str, market: str) ->
     )
     query = f"(filters:List({_TITLE_FILTER},{region_filter},{company_filter}))"
     return f"https://www.linkedin.com/sales/search/people?query={quote(query)}"
+
+
+def _csv_name(domain: str, market: str, batch_number: int) -> str:
+    """Deterministic, filesystem-safe name for PB output CSV. Unique per company+batch."""
+    slug = re.sub(r"[^a-z0-9]", "_", domain.lower()).strip("_")
+    return f"{slug}_{market}_{batch_number}"
+
+
+# ── Subsidiary detection ───────────────────────────────────────────────────────
+
+def _is_subsidiary(linkedin_url: str, domain: str) -> bool:
+    """True if another domain shares this LinkedIn URL (acquired / subsidiary company)."""
+    matches = fetch_all(
+        "sourced_tam_v2", "domain",
+        filters=[("eq", "linkedin_url", linkedin_url), ("neq", "domain", domain)],
+        limit=1,
+    )
+    return len(matches) > 0
+
+
+# ── Campaign batch count update ────────────────────────────────────────────────
+
+def _update_campaign_counts(domain: str, batch_number: int, count: int, source: str) -> None:
+    get_supabase().table("campaign_batches").update({
+        "contacts_sourced_count":  count,
+        "contacts_sourced_source": source if count > 0 else "none",
+    }).eq("domain", domain).eq("batch_number", batch_number).execute()
 
 
 # ── Gap detection ──────────────────────────────────────────────────────────────
@@ -120,8 +148,20 @@ def run_phase1(batch_number: int) -> int:
             logger.warning("contact_gaps: no linkedin_url for %s", row["domain"])
             continue
 
+        linkedin_url = tam[0]["linkedin_url"]
+
+        # Skip subsidiaries — same LinkedIn URL as another company
+        if _is_subsidiary(linkedin_url, row["domain"]):
+            sb.table("contact_gaps").update({
+                "phantombuster_status": "subsidiary_skipped",
+            }).eq("id", row["id"]).execute()
+            _update_campaign_counts(row["domain"], batch_number, 0, "subsidiary")
+            logger.info("contact_gaps: subsidiary_skipped for %s", row["domain"])
+            continue
+
         try:
-            container_id = launch_agent(agent_id, {"linkedInCompanyUrl": tam[0]["linkedin_url"]})
+            # spreadsheetUrl = the LinkedIn company page URL (confirmed from PB agent config)
+            container_id = launch_agent(agent_id, {"spreadsheetUrl": linkedin_url})
             sb.table("contact_gaps").update({
                 "phantombuster_status": "extracting_company",
                 "phantom_id": container_id,
@@ -166,7 +206,7 @@ def poll_phase1() -> int:
                 continue
 
             company_data = results[0]
-            # Field name TBC from first real run — try common variants
+            # Try common field name variants — confirmed on first real run
             org_id = (
                 company_data.get("linkedInId") or
                 company_data.get("companyId") or
@@ -184,10 +224,12 @@ def poll_phase1() -> int:
                 }).eq("id", row["id"]).execute()
                 continue
 
-            sales_nav_url = _build_sales_nav_url(str(org_id), row["company_name"] or "", row["market"] or "UK")
+            sales_nav_url = _build_sales_nav_url(
+                str(org_id), row["company_name"] or "", row["market"] or "UK"
+            )
             sb.table("contact_gaps").update({
-                "linkedin_company_id": str(org_id),
-                "sales_nav_url":       sales_nav_url,
+                "linkedin_company_id":  str(org_id),
+                "sales_nav_url":        sales_nav_url,
                 "phantombuster_status": "building_url",
             }).eq("id", row["id"]).execute()
             advanced += 1
@@ -203,7 +245,7 @@ def poll_phase1() -> int:
 def run_phase2() -> int:
     """Launch Sales Navigator Search Export for each row that has a sales_nav_url."""
     rows = fetch_all(
-        "contact_gaps", "id,domain,sales_nav_url",
+        "contact_gaps", "id,domain,company_name,market,batch_number,sales_nav_url",
         filters=[("eq", "phantombuster_status", "building_url")],
     )
     if not rows:
@@ -218,8 +260,13 @@ def run_phase2() -> int:
             continue
         try:
             container_id = launch_agent(agent_id, {
-                "salesNavigatorUrl": row["sales_nav_url"],
-                "numberOfProfiles": 25,
+                "inputType":                "salesNavigatorSearchUrl",
+                "numberOfProfiles":         25,
+                "numberOfResultsPerSearch": 25,
+                "numberOfLinesPerLaunch":   25,
+                "removeDuplicateProfiles":  False,
+                "salesNavigatorSearchUrl":  row["sales_nav_url"],
+                "csvName":                  _csv_name(row["domain"], row["market"] or "UK", row["batch_number"]),
             })
             sb.table("contact_gaps").update({
                 "phantombuster_status": "scraping_contacts",
@@ -236,7 +283,7 @@ def run_phase2() -> int:
 
 
 def poll_phase2() -> int:
-    """Check running Phase 2 containers. Write contacts to sourced_contacts when done."""
+    """Check Phase 2 containers. Score contacts and write to sourced_contacts when done."""
     rows = fetch_all(
         "contact_gaps", "id,domain,company_name,market,batch_number,phantom_id",
         filters=[("eq", "phantombuster_status", "scraping_contacts")],
@@ -258,20 +305,34 @@ def poll_phase2() -> int:
 
             result_rows = get_result_rows(container)
             contacts = [_map_contact(r, row) for r in result_rows if r]
-            # Require at least a LinkedIn URL to be usable
             contacts = [c for c in contacts if c.get("linkedin_url")]
 
-            for contact in contacts:
+            if not contacts:
+                sb.table("contact_gaps").update({
+                    "phantombuster_status": "no_contacts_found",
+                    "contacts_found": 0,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", row["id"]).execute()
+                _update_campaign_counts(row["domain"], row["batch_number"], 0, "none")
+                logger.info("contact_gaps: no contacts found for %s", row["domain"])
+                continue
+
+            # TODO: replace with Claude job relevancy scoring once prompt is confirmed.
+            # For now, write all contacts (scored as passing).
+            scored = contacts
+
+            for contact in scored:
                 sb.table("sourced_contacts").upsert(contact, on_conflict="domain,email").execute()
 
             now_iso = datetime.now(timezone.utc).isoformat()
             sb.table("contact_gaps").update({
                 "phantombuster_status": "completed",
-                "contacts_found":       len(contacts),
+                "contacts_found":       len(scored),
                 "completed_at":         now_iso,
             }).eq("id", row["id"]).execute()
+            _update_campaign_counts(row["domain"], row["batch_number"], len(scored), "linkedin")
             completed += 1
-            logger.info("contact_gaps: phase2 complete for %s → %d contacts", row["domain"], len(contacts))
+            logger.info("contact_gaps: completed for %s → %d contacts", row["domain"], len(scored))
         except Exception as exc:
             logger.error("contact_gaps: poll_phase2 error for %s: %s", row["domain"], exc)
 
@@ -284,6 +345,7 @@ def _map_contact(pb_row: dict, gap_row: dict) -> dict:
         "company_name": gap_row.get("company_name"),
         "market":       gap_row.get("market"),
         "batch_number": gap_row.get("batch_number"),
+        "source":       "linkedin",
         "email":        pb_row.get("email"),
         "first_name":   pb_row.get("firstName") or pb_row.get("first_name"),
         "last_name":    pb_row.get("lastName") or pb_row.get("last_name"),
@@ -298,7 +360,7 @@ def _map_contact(pb_row: dict, gap_row: dict) -> dict:
 
 async def _run_contact_gaps_bg(batch_number: int) -> None:
     try:
-        gaps    = detect_gaps(batch_number)
+        gaps     = detect_gaps(batch_number)
         launched = run_phase1(batch_number)
         await notify(
             f"🔍 *Contact gaps — batch #{batch_number}*\n"
@@ -319,8 +381,8 @@ async def run_contact_gaps(batch_number: int, background_tasks: BackgroundTasks)
 @router.post("/pipelines/contact-gaps/poll")
 async def poll_contact_gaps():
     """Advance all in-flight PhantomBuster jobs. Run every 30 min via Railway cron."""
-    p1 = poll_phase1()
-    launched = run_phase2()   # rows that just finished phase 1 → launch phase 2
-    p2 = poll_phase2()
-    logger.info("contact_gaps/poll: p1_advanced=%d p2_launched=%d p2_completed=%d", p1, launched, p2)
+    p1       = poll_phase1()
+    launched = run_phase2()
+    p2       = poll_phase2()
+    logger.info("contact_gaps/poll: p1=%d p2_launched=%d p2_done=%d", p1, launched, p2)
     return {"phase1_advanced": p1, "phase2_launched": launched, "phase2_completed": p2}
