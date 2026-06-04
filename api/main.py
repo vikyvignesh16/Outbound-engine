@@ -2,7 +2,7 @@ import logging
 
 from fastapi import FastAPI
 from webhooks import clay_tam, clay_contacts, lemlist_events, albacross
-from pipelines import qualification, enrichment, monthly_batch, daily_runner, content, contact_gaps
+from pipelines import qualification, enrichment, monthly_batch, daily_runner, content, contact_gaps, score_contacts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,6 +21,7 @@ app.include_router(monthly_batch.router)
 app.include_router(daily_runner.router)
 app.include_router(content.router)
 app.include_router(contact_gaps.router)
+app.include_router(score_contacts.router)
 
 @app.get("/health")
 def health():

@@ -8,3 +8,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Local data exports (CSVs, test output)
+data/
+output_sequences.csv

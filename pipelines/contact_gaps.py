@@ -32,7 +32,9 @@ _TITLE_FILTER = (
     "(text:Marketing Automation,selectionType:INCLUDED),"
     "(text:Marketing Communications,selectionType:INCLUDED),"
     "(text:CMO,selectionType:INCLUDED),"
-    "(id:716,text:Chief Marketing Officer,selectionType:INCLUDED)"
+    "(id:716,text:Chief Marketing Officer,selectionType:INCLUDED),"
+    "(text:marketing,selectionType:INCLUDED),"
+    "(text:communications,selectionType:INCLUDED)"
     "))"
 )
 
@@ -55,10 +57,12 @@ def _build_sales_nav_url(company_org_id: str, company_name: str, market: str) ->
     return f"https://www.linkedin.com/sales/search/people?query={quote(query)}"
 
 
-def _csv_name(domain: str, market: str, batch_number: int) -> str:
-    """Deterministic, filesystem-safe name for PB output CSV. Unique per company+batch."""
-    slug = re.sub(r"[^a-z0-9]", "_", domain.lower()).strip("_")
-    return f"{slug}_{market}_{batch_number}"
+def _csv_name(company_name: str | None) -> str:
+    """Filesystem-safe name for PB output CSV: sanitized company name + unix timestamp.
+    Unique per launch even when a company is re-scraped later."""
+    import time as _time
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", (company_name or "")).strip("_") or "company"
+    return f"{slug}_{int(_time.time())}"
 
 
 # ── Subsidiary detection ───────────────────────────────────────────────────────
@@ -119,13 +123,25 @@ def detect_gaps(batch_number: int) -> int:
 # ── Phase 1 — LinkedIn Company Data Extractor ──────────────────────────────────
 
 def run_phase1(batch_number: int) -> int:
-    """Launch LinkedIn Company Data Extractor for each pending gap."""
+    """Launch LinkedIn Company Data Extractor for ONE pending gap, if no PB container
+    is currently in flight. PhantomBuster workspaces have a single parallel-execution
+    slot; launching all pending at once trips the workspace limit and silently fails."""
+    in_flight = fetch_all(
+        "contact_gaps", "id",
+        filters=[("in", "phantombuster_status", "(extracting_company,scraping_contacts)")],
+        limit=1,
+    )
+    if in_flight:
+        logger.info("contact_gaps: phase1 skipped — another container in flight")
+        return 0
+
     pending = fetch_all(
         "contact_gaps", "id,domain,company_name,market",
         filters=[
             ("eq", "phantombuster_status", "pending"),
             ("eq", "batch_number", batch_number),
         ],
+        limit=1,
     )
     if not pending:
         return 0
@@ -206,8 +222,12 @@ def poll_phase1() -> int:
                 continue
 
             company_data = results[0]
-            # Try common field name variants — confirmed on first real run
+            # PB Company Extractor result fields (confirmed from a successful scrape):
+            #   linkedinID  → the canonical LinkedIn organisation id used by Sales Nav
+            #   mainCompanyID → same value, surfaced when the URL hits a redirected page
             org_id = (
+                company_data.get("linkedinID") or
+                company_data.get("mainCompanyID") or
                 company_data.get("linkedInId") or
                 company_data.get("companyId") or
                 company_data.get("id") or
@@ -243,10 +263,21 @@ def poll_phase1() -> int:
 # ── Phase 2 — Sales Navigator Search Export ────────────────────────────────────
 
 def run_phase2() -> int:
-    """Launch Sales Navigator Search Export for each row that has a sales_nav_url."""
+    """Launch Sales Navigator Search Export for ONE row, if no other PB container is
+    in flight (same parallel-slot constraint as run_phase1)."""
+    in_flight = fetch_all(
+        "contact_gaps", "id",
+        filters=[("in", "phantombuster_status", "(extracting_company,scraping_contacts)")],
+        limit=1,
+    )
+    if in_flight:
+        logger.info("contact_gaps: phase2 skipped — another container in flight")
+        return 0
+
     rows = fetch_all(
         "contact_gaps", "id,domain,company_name,market,batch_number,sales_nav_url",
         filters=[("eq", "phantombuster_status", "building_url")],
+        limit=1,
     )
     if not rows:
         return 0
@@ -263,10 +294,10 @@ def run_phase2() -> int:
                 "inputType":                "salesNavigatorSearchUrl",
                 "numberOfProfiles":         25,
                 "numberOfResultsPerSearch": 25,
-                "numberOfLinesPerLaunch":   25,
+                "numberOfLinesPerLaunch":   1,
                 "removeDuplicateProfiles":  False,
                 "salesNavigatorSearchUrl":  row["sales_nav_url"],
-                "csvName":                  _csv_name(row["domain"], row["market"] or "UK", row["batch_number"]),
+                "csvName":                  _csv_name(row["company_name"]),
             })
             sb.table("contact_gaps").update({
                 "phantombuster_status": "scraping_contacts",
@@ -283,7 +314,9 @@ def run_phase2() -> int:
 
 
 def poll_phase2() -> int:
-    """Check Phase 2 containers. Score contacts and write to sourced_contacts when done."""
+    """Check Phase 2 containers. Write scraped contacts to phantombuster_contacts
+    (unscored).  The daily /pipelines/score-contacts cron later submits unscored
+    rows to Claude and promotes score >= 3 to sourced_contacts."""
     rows = fetch_all(
         "contact_gaps", "id,domain,company_name,market,batch_number,phantom_id",
         filters=[("eq", "phantombuster_status", "scraping_contacts")],
@@ -317,22 +350,22 @@ def poll_phase2() -> int:
                 logger.info("contact_gaps: no contacts found for %s", row["domain"])
                 continue
 
-            # TODO: replace with Claude job relevancy scoring once prompt is confirmed.
-            # For now, write all contacts (scored as passing).
-            scored = contacts
-
-            for contact in scored:
-                sb.table("sourced_contacts").upsert(contact, on_conflict="domain,email").execute()
+            for contact in contacts:
+                sb.table("phantombuster_contacts").upsert(
+                    contact, on_conflict="domain,linkedin_url,batch_number"
+                ).execute()
 
             now_iso = datetime.now(timezone.utc).isoformat()
             sb.table("contact_gaps").update({
                 "phantombuster_status": "completed",
-                "contacts_found":       len(scored),
+                "contacts_found":       len(contacts),
                 "completed_at":         now_iso,
             }).eq("id", row["id"]).execute()
-            _update_campaign_counts(row["domain"], row["batch_number"], len(scored), "linkedin")
+            # Mark as 'linkedin' to record where the count came from; score_contacts will
+            # decide which subset of those is actually promoted to sourced_contacts.
+            _update_campaign_counts(row["domain"], row["batch_number"], len(contacts), "linkedin")
             completed += 1
-            logger.info("contact_gaps: completed for %s → %d contacts", row["domain"], len(scored))
+            logger.info("contact_gaps: completed for %s → %d contacts (unscored)", row["domain"], len(contacts))
         except Exception as exc:
             logger.error("contact_gaps: poll_phase2 error for %s: %s", row["domain"], exc)
 
@@ -340,18 +373,25 @@ def poll_phase2() -> int:
 
 
 def _map_contact(pb_row: dict, gap_row: dict) -> dict:
+    """Shape a PB Sales Nav result row to match phantombuster_contacts columns."""
     return {
         "domain":       gap_row["domain"],
         "company_name": gap_row.get("company_name"),
         "market":       gap_row.get("market"),
         "batch_number": gap_row.get("batch_number"),
-        "source":       "linkedin",
         "email":        pb_row.get("email"),
         "first_name":   pb_row.get("firstName") or pb_row.get("first_name"),
-        "last_name":    pb_row.get("lastName") or pb_row.get("last_name"),
-        "job_title":    pb_row.get("title") or pb_row.get("occupation"),
-        "seniority":    pb_row.get("seniority"),
-        "linkedin_url": pb_row.get("profileUrl") or pb_row.get("linkedInUrl") or pb_row.get("linkedin_url"),
+        "last_name":    pb_row.get("lastName")  or pb_row.get("last_name"),
+        "job_title":    pb_row.get("title") or pb_row.get("occupation") or pb_row.get("currentJob"),
+        # Prefer regular LinkedIn profile URLs over Sales Nav lead URLs (which can't be
+        # used outside Sales Navigator). PB returns both for each row.
+        "linkedin_url": (
+            pb_row.get("linkedInProfileUrl")
+            or pb_row.get("defaultProfileUrl")
+            or pb_row.get("profileUrl")
+            or pb_row.get("linkedinUrl")
+            or pb_row.get("linkedin_url")
+        ),
         "raw":          pb_row,
     }
 

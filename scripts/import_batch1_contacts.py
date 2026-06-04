@@ -16,21 +16,20 @@ from supabase import create_client
 
 BATCH_NUMBER = 1
 
-# ── Update this map once you share the CSV ────────────────────────────────────
-# Format: "sourced_contacts column" → "CSV header"
-# Set value to None to skip a column.
+# CSV headers (from 77d19efccf0687ff1a5dde0e3d1a6d2d.csv — 1050-row Clay UKI export):
+# "Domain", "Market", "Company Name", "First Name", "Last Name",
+# "Job Title", "LinkedIn Profile", "Preferred Email"
 COLUMN_MAP = {
-    "domain":       "domain",          # update if different
-    "company_name": "company_name",
-    "market":       "market",
-    "email":        "email",
-    "first_name":   "first_name",
-    "last_name":    "last_name",
-    "job_title":    "job_title",
-    "seniority":    "seniority",
-    "linkedin_url": "linkedin_url",
+    "domain":       "Domain",
+    "company_name": "Company Name",
+    "email":        "Preferred Email",
+    "first_name":   "First Name",
+    "last_name":    "Last Name",
+    "job_title":    "Job Title",
+    "linkedin_url": "LinkedIn Profile",
+    "seniority":    None,   # not in CSV
+    "market":       "Market",
 }
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def map_row(csv_row: dict) -> dict:
