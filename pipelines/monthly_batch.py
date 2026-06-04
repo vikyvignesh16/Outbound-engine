@@ -34,7 +34,22 @@ async def run_monthly_batch() -> dict:
     """
     sb = get_supabase()
 
-    existing = fetch_all("campaign_batches", "domain, market, company_name, batch_number")
+    batch_month = date.today().replace(day=1).isoformat()
+
+    existing = fetch_all("campaign_batches", "domain, market, company_name, batch_number, batch_month")
+
+    # Idempotency guard — if a batch already exists for this calendar month, return it
+    this_month = [r for r in existing if r.get("batch_month") == batch_month]
+    if this_month:
+        existing_batch_number = this_month[0]["batch_number"]
+        logger.info("monthly_batch: batch #%d already exists for %s — skipping", existing_batch_number, batch_month)
+        return {
+            "status": "already_exists",
+            "selected": len(this_month),
+            "batch_number": existing_batch_number,
+            "batch_month": batch_month,
+        }
+
     contacted = {(r["domain"], r["market"], r["company_name"]) for r in existing}
     next_batch_number = max((r["batch_number"] for r in existing), default=0) + 1
 
@@ -47,8 +62,6 @@ async def run_monthly_batch() -> dict:
         "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp",
         order_by=[("account_fit_score", True), ("prioritized_at", False)],
     )
-
-    batch_month = date.today().replace(day=1).isoformat()
 
     uki_selected = [
         {**row, "batch_number": next_batch_number, "batch_month": batch_month}
