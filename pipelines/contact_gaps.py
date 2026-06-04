@@ -454,6 +454,64 @@ async def run_contact_gaps_latest(background_tasks: BackgroundTasks):
     return {"status": "started", "batch_number": batch_number}
 
 
+async def _post_digest_bg() -> None:
+    """Daily digest: post one Slack message summarising progress on the latest batch."""
+    from datetime import datetime, timedelta, timezone
+    from collections import Counter
+
+    batches = fetch_all("campaign_batches", "batch_number",
+                        order_by=[("batch_number", True)], limit=1)
+    if not batches:
+        return
+    bn = batches[0]["batch_number"]
+
+    gaps = fetch_all("contact_gaps", "phantombuster_status,completed_at",
+                     filters=[("eq", "batch_number", bn)])
+    status_counts = Counter(g["phantombuster_status"] for g in gaps)
+    total = len(gaps)
+    terminal = sum(status_counts.get(s, 0) for s in
+                   ("completed", "no_contacts_found", "failed", "subsidiary_skipped"))
+    in_flight = sum(status_counts.get(s, 0) for s in
+                    ("extracting_company", "scraping_contacts"))
+    pending = status_counts.get("pending", 0)
+
+    # Last 24h throughput
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    completed_last_24h = sum(
+        1 for g in gaps
+        if g.get("completed_at") and
+        datetime.fromisoformat(g["completed_at"].replace("Z", "+00:00")) > cutoff
+    )
+
+    pbc_rows = fetch_all("phantombuster_contacts",
+                         "relevance_score,scored_at,promoted_to_sourced_contacts",
+                         filters=[("eq", "batch_number", bn)])
+    scraped_total = len(pbc_rows)
+    scored        = sum(1 for r in pbc_rows if r.get("scored_at"))
+    promoted      = sum(1 for r in pbc_rows if r.get("promoted_to_sourced_contacts"))
+    relevant_pct  = round(promoted / scored * 100) if scored else 0
+
+    pct = round(terminal / total * 100) if total else 0
+    eta_days = round(pending / completed_last_24h) if completed_last_24h else None
+    eta_str  = f"~{eta_days} days" if eta_days else "n/a (no recent throughput)"
+
+    msg = (
+        f"📊 *Contact-gap progress — batch #{bn}*\n"
+        f"• Companies: *{terminal}/{total}* done ({pct}%) — {in_flight} in flight, {pending} pending\n"
+        f"• Throughput (24h): {completed_last_24h} companies — ETA: {eta_str}\n"
+        f"• PB contacts scraped: {scraped_total} — scored: {scored} — promoted: {promoted} ({relevant_pct}% relevant)\n"
+        f"• Failed/skipped: {status_counts.get('failed', 0) + status_counts.get('subsidiary_skipped', 0)}"
+    )
+    await notify(msg)
+
+
+@router.post("/pipelines/contact-gaps/digest")
+async def contact_gaps_digest(background_tasks: BackgroundTasks):
+    """Daily Slack digest of contact-gap pipeline progress on the latest batch."""
+    background_tasks.add_task(_post_digest_bg)
+    return {"status": "started"}
+
+
 @router.post("/pipelines/contact-gaps/poll")
 async def poll_contact_gaps():
     """Advance all in-flight PhantomBuster jobs. Run every 30 min via Railway cron."""
