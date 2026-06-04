@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import FastAPI
-from webhooks import clay_tam, clay_contacts
+from webhooks import clay_tam, clay_contacts, lemlist_events
 from pipelines import qualification, enrichment, monthly_batch, daily_runner, content
 
 logging.basicConfig(
@@ -13,6 +13,7 @@ app = FastAPI(title="Brevo Outbound Engine")
 
 app.include_router(clay_tam.router)
 app.include_router(clay_contacts.router)
+app.include_router(lemlist_events.router)
 app.include_router(qualification.router)
 app.include_router(enrichment.router)
 app.include_router(monthly_batch.router)
