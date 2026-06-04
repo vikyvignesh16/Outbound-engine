@@ -145,10 +145,15 @@ def detect_gaps(batch_number: int) -> int:
 
 # ── Phase 1 — LinkedIn Company Data Extractor ──────────────────────────────────
 
+DAILY_PHASE1_LIMIT = 150  # PhantomBuster's LinkedIn Company Extractor limit/day
+
+
 def run_phase1(batch_number: int) -> int:
     """Launch LinkedIn Company Data Extractor for ONE pending gap, if no PB container
-    is currently in flight. PhantomBuster workspaces have a single parallel-execution
-    slot; launching all pending at once trips the workspace limit and silently fails."""
+    is currently in flight AND today's launch count is below DAILY_PHASE1_LIMIT.
+
+    PhantomBuster workspaces have a single parallel-execution slot AND a daily
+    cap of 150 LinkedIn Company Extractor runs.  We enforce both."""
     in_flight = fetch_all(
         "contact_gaps", "id",
         filters=[("in_", "phantombuster_status", ["extracting_company", "scraping_contacts"])],
@@ -156,6 +161,20 @@ def run_phase1(batch_number: int) -> int:
     )
     if in_flight:
         logger.info("contact_gaps: phase1 skipped — another container in flight")
+        return 0
+
+    today_utc_midnight = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).isoformat()
+    today_launches = fetch_all(
+        "contact_gaps", "id",
+        filters=[("gte", "phase1_launched_at", today_utc_midnight)],
+    )
+    if len(today_launches) >= DAILY_PHASE1_LIMIT:
+        logger.info(
+            "contact_gaps: phase1 skipped — daily cap reached (%d/%d launches today)",
+            len(today_launches), DAILY_PHASE1_LIMIT,
+        )
         return 0
 
     pending = fetch_all(
@@ -205,6 +224,7 @@ def run_phase1(batch_number: int) -> int:
                 "phantombuster_status": "extracting_company",
                 "phantom_id": container_id,
                 "phase": 1,
+                "phase1_launched_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", row["id"]).execute()
             launched += 1
             logger.info("contact_gaps: phase1 launched for %s → container %s", row["domain"], container_id)
@@ -514,9 +534,35 @@ async def contact_gaps_digest(background_tasks: BackgroundTasks):
 
 @router.post("/pipelines/contact-gaps/poll")
 async def poll_contact_gaps():
-    """Advance all in-flight PhantomBuster jobs. Run every 30 min via Railway cron."""
-    p1       = poll_phase1()
-    launched = run_phase2()
-    p2       = poll_phase2()
-    logger.info("contact_gaps/poll: p1=%d p2_launched=%d p2_done=%d", p1, launched, p2)
-    return {"phase1_advanced": p1, "phase2_launched": launched, "phase2_completed": p2}
+    """Advance all in-flight PhantomBuster jobs AND launch the next pending one.
+    Run every 30 min via Railway cron.
+
+    Sequencing inside a single call:
+      1. poll_phase1 — drain any finished Phase 1 containers to building_url
+      2. run_phase2  — if no in-flight, launch ONE Sales Nav search
+      3. poll_phase2 — drain any finished Phase 2 containers (write contacts)
+      4. run_phase1  — if no in-flight + under daily cap, launch ONE Phase 1
+    """
+    p1_done       = poll_phase1()
+    p2_launched   = run_phase2()
+    p2_done       = poll_phase2()
+    p1_launched   = run_phase1_for_latest_batch()
+    logger.info(
+        "contact_gaps/poll: p1_done=%d p2_launched=%d p2_done=%d p1_launched=%d",
+        p1_done, p2_launched, p2_done, p1_launched,
+    )
+    return {
+        "phase1_advanced":   p1_done,
+        "phase2_launched":   p2_launched,
+        "phase2_completed":  p2_done,
+        "phase1_launched":   p1_launched,
+    }
+
+
+def run_phase1_for_latest_batch() -> int:
+    """Cron-friendly run_phase1: resolves the latest batch_number itself."""
+    batches = fetch_all("campaign_batches", "batch_number",
+                        order_by=[("batch_number", True)], limit=1)
+    if not batches:
+        return 0
+    return run_phase1(batches[0]["batch_number"])
