@@ -353,7 +353,7 @@ async def run_technographic_compare() -> dict:
     rows = fetch_all(
         "qualified_tam_v2",
         "domain, market",
-        [("not_.is_", "esp_score", "null"), ("is_", "esp_detected_builtwith", "null")],
+        [("not_", "esp_score", "is", "null"), ("is_", "esp_detected_builtwith", "null")],
     )
 
     if not rows:
