@@ -418,6 +418,19 @@ async def run_contact_gaps(batch_number: int, background_tasks: BackgroundTasks)
     return {"status": "started", "batch_number": batch_number}
 
 
+@router.post("/pipelines/contact-gaps/run-latest")
+async def run_contact_gaps_latest(background_tasks: BackgroundTasks):
+    """Cron-friendly: trigger contact-gaps for the most recent batch_number in
+    campaign_batches.  Used by the day-2 monthly cron."""
+    rows = fetch_all("campaign_batches", "batch_number",
+                     order_by=[("batch_number", True)], limit=1)
+    if not rows:
+        return {"status": "no_batches"}
+    batch_number = rows[0]["batch_number"]
+    background_tasks.add_task(_run_contact_gaps_bg, batch_number)
+    return {"status": "started", "batch_number": batch_number}
+
+
 @router.post("/pipelines/contact-gaps/poll")
 async def poll_contact_gaps():
     """Advance all in-flight PhantomBuster jobs. Run every 30 min via Railway cron."""
