@@ -269,7 +269,10 @@ def _select_esp_list(data: dict) -> list[dict]:
 async def get_techstack(domain: str, client: httpx.AsyncClient) -> dict:
     """Calls the Technographic API with exponential backoff on 500 errors."""
     url = f"{TECHNOGRAPHIC_BASE_URL}/v1/data-enrichment/domain-analysis"
-    headers = {}  # public endpoint — no auth required
+    headers = {
+        "CF-Access-Client-Id":     os.environ["CF_ACCESS_CLIENT_ID"],
+        "CF-Access-Client-Secret": os.environ["CF_ACCESS_CLIENT_SECRET"],
+    }
 
     for attempt, wait in enumerate([0, 1, 2, 4]):
         if wait:
