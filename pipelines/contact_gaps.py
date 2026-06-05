@@ -335,6 +335,20 @@ def run_phase2() -> int:
     if not rows:
         return 0
 
+    # Wait until we have a full batch of 5 before firing Phase 2 — but only if
+    # more pending rows could still produce more building_url rows. This is the
+    # core trick that lets Phase 1 run 5x before Phase 2 hogs the parallel slot.
+    if len(rows) < PHASE2_BATCH_SIZE:
+        pending = fetch_all("contact_gaps", "id",
+                            filters=[("eq", "phantombuster_status", "pending")], limit=1)
+        if pending:
+            logger.info(
+                "contact_gaps: phase2 holding — only %d building_url rows ready, "
+                "letting phase1 accumulate to %d", len(rows), PHASE2_BATCH_SIZE,
+            )
+            return 0
+        # No more pending — drain the partial batch (last-minute stragglers).
+
     sb = get_supabase()
     agent_id = os.environ["PHANTOMBUSTER_SALES_NAV_ID"]
     ids = ",".join(str(r["id"]) for r in rows)
