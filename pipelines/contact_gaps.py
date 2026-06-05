@@ -308,15 +308,15 @@ def poll_phase1() -> int:
 # ── Phase 2 — Sales Navigator Search Export ────────────────────────────────────
 
 def run_phase2() -> int:
-    """Launch Sales Navigator Search Export with up to PHASE2_BATCH_SIZE URLs in ONE
-    container, if no other PB container is in flight.
+    """Launch Sales Navigator Search Export for ONE building_url row if no PB
+    container is currently in flight.
 
-    PB processes the 5 URLs sequentially inside a single container (~5 min total
-    instead of ~15 min spread across 5 separate launches), freeing the shared
-    parallel slot for Phase 1 launches sooner.
-
-    The 5 contact_gaps rows share the same phantom_id; poll_phase2 demuxes results
-    by the `companyId` field returned per scraped profile."""
+    Note on batching: we tried 5-URL spreadsheetUrl input mode but PB's Sales Nav
+    Search Export agent does not honour numberOfLinesPerLaunch the way docs
+    suggest — it processes only the first line (which it treats as the header
+    literal `salesNavigatorSearchUrl`) and ignores the rest.  So we stay at
+    one URL per launch; throughput is gated by the workspace's single parallel
+    slot anyway (the 150/day Phase 1 cap is the actual bottleneck)."""
     in_flight = fetch_all(
         "contact_gaps", "id",
         filters=[("in_", "phantombuster_status", ["extracting_company", "scraping_contacts"])],
@@ -329,56 +329,36 @@ def run_phase2() -> int:
     rows = fetch_all(
         "contact_gaps", "id,domain,company_name,market,batch_number,sales_nav_url,linkedin_company_id",
         filters=[("eq", "phantombuster_status", "building_url")],
-        limit=PHASE2_BATCH_SIZE,
+        limit=1,
     )
     rows = [r for r in rows if r.get("sales_nav_url")]
     if not rows:
         return 0
 
-    # Wait until we have a full batch of 5 before firing Phase 2 — but only if
-    # more pending rows could still produce more building_url rows. This is the
-    # core trick that lets Phase 1 run 5x before Phase 2 hogs the parallel slot.
-    if len(rows) < PHASE2_BATCH_SIZE:
-        pending = fetch_all("contact_gaps", "id",
-                            filters=[("eq", "phantombuster_status", "pending")], limit=1)
-        if pending:
-            logger.info(
-                "contact_gaps: phase2 holding — only %d building_url rows ready, "
-                "letting phase1 accumulate to %d", len(rows), PHASE2_BATCH_SIZE,
-            )
-            return 0
-        # No more pending — drain the partial batch (last-minute stragglers).
-
     sb = get_supabase()
     agent_id = os.environ["PHANTOMBUSTER_SALES_NAV_ID"]
-    ids = ",".join(str(r["id"]) for r in rows)
-    csv_url = f"{PUBLIC_API_BASE}/pipelines/contact-gaps/sales-nav-csv?ids={ids}"
+    row = rows[0]
 
     try:
         container_id = launch_agent(agent_id, {
-            "inputType":                "spreadsheetUrl",
-            "spreadsheetUrl":           csv_url,
+            "inputType":                "salesNavigatorSearchUrl",
             "numberOfProfiles":         25,
             "numberOfResultsPerSearch": 25,
-            "numberOfLinesPerLaunch":   PHASE2_BATCH_SIZE,
+            "numberOfLinesPerLaunch":   1,
             "removeDuplicateProfiles":  False,
-            "csvName":                  f"phase2_batch_{int(__import__('time').time())}",
+            "salesNavigatorSearchUrl":  row["sales_nav_url"],
+            "csvName":                  _csv_name(row["company_name"]),
         })
         sb.table("contact_gaps").update({
             "phantombuster_status": "scraping_contacts",
             "phantom_id": container_id,
             "phase": 2,
-        }).in_("id", [r["id"] for r in rows]).execute()
-        logger.info(
-            "contact_gaps: phase2 batch launched (%d rows, container %s): %s",
-            len(rows), container_id, [r["domain"] for r in rows],
-        )
+        }).eq("id", row["id"]).execute()
+        logger.info("contact_gaps: phase2 launched for %s → container %s", row["domain"], container_id)
         return 1
     except Exception as exc:
-        logger.error("contact_gaps: phase2 batch launch failed: %s", exc)
-        sb.table("contact_gaps").update({"phantombuster_status": "failed"}).in_(
-            "id", [r["id"] for r in rows]
-        ).execute()
+        logger.error("contact_gaps: phase2 launch failed for %s: %s", row["domain"], exc)
+        sb.table("contact_gaps").update({"phantombuster_status": "failed"}).eq("id", row["id"]).execute()
         return 0
 
 
