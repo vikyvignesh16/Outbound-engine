@@ -145,7 +145,9 @@ def detect_gaps(batch_number: int) -> int:
 
 # ── Phase 1 — LinkedIn Company Data Extractor ──────────────────────────────────
 
-DAILY_PHASE1_LIMIT = 150  # PhantomBuster's LinkedIn Company Extractor limit/day
+DAILY_PHASE1_LIMIT = 150     # PhantomBuster's LinkedIn Company Extractor limit/day
+PHASE2_BATCH_SIZE  = 5       # Sales Nav URLs per Phase 2 launch (5x throughput)
+PUBLIC_API_BASE    = "https://brevooutboundengine-production.up.railway.app"
 
 
 def run_phase1(batch_number: int) -> int:
@@ -306,8 +308,15 @@ def poll_phase1() -> int:
 # ── Phase 2 — Sales Navigator Search Export ────────────────────────────────────
 
 def run_phase2() -> int:
-    """Launch Sales Navigator Search Export for ONE row, if no other PB container is
-    in flight (same parallel-slot constraint as run_phase1)."""
+    """Launch Sales Navigator Search Export with up to PHASE2_BATCH_SIZE URLs in ONE
+    container, if no other PB container is in flight.
+
+    PB processes the 5 URLs sequentially inside a single container (~5 min total
+    instead of ~15 min spread across 5 separate launches), freeing the shared
+    parallel slot for Phase 1 launches sooner.
+
+    The 5 contact_gaps rows share the same phantom_id; poll_phase2 demuxes results
+    by the `companyId` field returned per scraped profile."""
     in_flight = fetch_all(
         "contact_gaps", "id",
         filters=[("in_", "phantombuster_status", ["extracting_company", "scraping_contacts"])],
@@ -318,99 +327,119 @@ def run_phase2() -> int:
         return 0
 
     rows = fetch_all(
-        "contact_gaps", "id,domain,company_name,market,batch_number,sales_nav_url",
+        "contact_gaps", "id,domain,company_name,market,batch_number,sales_nav_url,linkedin_company_id",
         filters=[("eq", "phantombuster_status", "building_url")],
-        limit=1,
+        limit=PHASE2_BATCH_SIZE,
     )
+    rows = [r for r in rows if r.get("sales_nav_url")]
     if not rows:
         return 0
 
     sb = get_supabase()
     agent_id = os.environ["PHANTOMBUSTER_SALES_NAV_ID"]
-    launched = 0
+    ids = ",".join(str(r["id"]) for r in rows)
+    csv_url = f"{PUBLIC_API_BASE}/pipelines/contact-gaps/sales-nav-csv?ids={ids}"
 
-    for row in rows:
-        if not row.get("sales_nav_url"):
-            continue
-        try:
-            container_id = launch_agent(agent_id, {
-                "inputType":                "salesNavigatorSearchUrl",
-                "numberOfProfiles":         25,
-                "numberOfResultsPerSearch": 25,
-                "numberOfLinesPerLaunch":   1,
-                "removeDuplicateProfiles":  False,
-                "salesNavigatorSearchUrl":  row["sales_nav_url"],
-                "csvName":                  _csv_name(row["company_name"]),
-            })
-            sb.table("contact_gaps").update({
-                "phantombuster_status": "scraping_contacts",
-                "phantom_id": container_id,
-                "phase": 2,
-            }).eq("id", row["id"]).execute()
-            launched += 1
-            logger.info("contact_gaps: phase2 launched for %s → container %s", row["domain"], container_id)
-        except Exception as exc:
-            logger.error("contact_gaps: phase2 launch failed for %s: %s", row["domain"], exc)
-            sb.table("contact_gaps").update({"phantombuster_status": "failed"}).eq("id", row["id"]).execute()
-
-    return launched
+    try:
+        container_id = launch_agent(agent_id, {
+            "inputType":                "spreadsheetUrl",
+            "spreadsheetUrl":           csv_url,
+            "numberOfProfiles":         25,
+            "numberOfResultsPerSearch": 25,
+            "numberOfLinesPerLaunch":   PHASE2_BATCH_SIZE,
+            "removeDuplicateProfiles":  False,
+            "csvName":                  f"phase2_batch_{int(__import__('time').time())}",
+        })
+        sb.table("contact_gaps").update({
+            "phantombuster_status": "scraping_contacts",
+            "phantom_id": container_id,
+            "phase": 2,
+        }).in_("id", [r["id"] for r in rows]).execute()
+        logger.info(
+            "contact_gaps: phase2 batch launched (%d rows, container %s): %s",
+            len(rows), container_id, [r["domain"] for r in rows],
+        )
+        return 1
+    except Exception as exc:
+        logger.error("contact_gaps: phase2 batch launch failed: %s", exc)
+        sb.table("contact_gaps").update({"phantombuster_status": "failed"}).in_(
+            "id", [r["id"] for r in rows]
+        ).execute()
+        return 0
 
 
 def poll_phase2() -> int:
-    """Check Phase 2 containers. Write scraped contacts to phantombuster_contacts
-    (unscored).  The daily /pipelines/score-contacts cron later submits unscored
-    rows to Claude and promotes score >= 3 to sourced_contacts."""
+    """Check Phase 2 containers.  Multiple contact_gaps rows may share the same
+    phantom_id (batched launch), so we group by phantom_id, fetch each container
+    once, and demux the scraped profiles back to their company via the row's
+    `companyId` field (= linkedin_company_id)."""
     rows = fetch_all(
-        "contact_gaps", "id,domain,company_name,market,batch_number,phantom_id",
+        "contact_gaps",
+        "id,domain,company_name,market,batch_number,phantom_id,linkedin_company_id",
         filters=[("eq", "phantombuster_status", "scraping_contacts")],
     )
     if not rows:
         return 0
 
+    # Group rows by container so we hit PB once per container, not once per row.
+    by_container: dict[str, list[dict]] = {}
+    for r in rows:
+        by_container.setdefault(r["phantom_id"], []).append(r)
+
     sb = get_supabase()
     completed = 0
 
-    for row in rows:
+    for container_id, gap_rows in by_container.items():
         try:
-            container = get_container(row["phantom_id"])
+            container = get_container(container_id)
             if not is_finished(container):
                 continue
             if is_error(container):
-                sb.table("contact_gaps").update({"phantombuster_status": "failed"}).eq("id", row["id"]).execute()
-                continue
-
-            result_rows = get_result_rows(container)
-            contacts = [_map_contact(r, row) for r in result_rows if r]
-            contacts = [c for c in contacts if c.get("linkedin_url")]
-
-            if not contacts:
-                sb.table("contact_gaps").update({
-                    "phantombuster_status": "no_contacts_found",
-                    "contacts_found": 0,
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", row["id"]).execute()
-                _update_campaign_counts(row["domain"], row["batch_number"], 0, "none")
-                logger.info("contact_gaps: no contacts found for %s", row["domain"])
-                continue
-
-            for contact in contacts:
-                sb.table("phantombuster_contacts").upsert(
-                    contact, on_conflict="domain,linkedin_url,batch_number"
+                sb.table("contact_gaps").update({"phantombuster_status": "failed"}).in_(
+                    "id", [g["id"] for g in gap_rows]
                 ).execute()
+                logger.warning("contact_gaps: phase2 container %s errored", container_id)
+                continue
+
+            result_rows = get_result_rows({**container, "id": container_id})
+            # Demux scraped profiles back to companies by matching companyId
+            by_company: dict[str, list[dict]] = {}
+            for pb in result_rows:
+                cid = str(pb.get("companyId") or "")
+                if cid:
+                    by_company.setdefault(cid, []).append(pb)
 
             now_iso = datetime.now(timezone.utc).isoformat()
-            sb.table("contact_gaps").update({
-                "phantombuster_status": "completed",
-                "contacts_found":       len(contacts),
-                "completed_at":         now_iso,
-            }).eq("id", row["id"]).execute()
-            # Mark as 'linkedin' to record where the count came from; score_contacts will
-            # decide which subset of those is actually promoted to sourced_contacts.
-            _update_campaign_counts(row["domain"], row["batch_number"], len(contacts), "linkedin")
-            completed += 1
-            logger.info("contact_gaps: completed for %s → %d contacts (unscored)", row["domain"], len(contacts))
+            for gap in gap_rows:
+                org_id = str(gap.get("linkedin_company_id") or "")
+                pb_rows_for_company = by_company.get(org_id, [])
+                contacts = [_map_contact(r, gap) for r in pb_rows_for_company if r]
+                contacts = [c for c in contacts if c.get("linkedin_url")]
+
+                if not contacts:
+                    sb.table("contact_gaps").update({
+                        "phantombuster_status": "no_contacts_found",
+                        "contacts_found":       0,
+                        "completed_at":         now_iso,
+                    }).eq("id", gap["id"]).execute()
+                    _update_campaign_counts(gap["domain"], gap["batch_number"], 0, "none")
+                    logger.info("contact_gaps: no contacts found for %s", gap["domain"])
+                    continue
+
+                for contact in contacts:
+                    sb.table("phantombuster_contacts").upsert(
+                        contact, on_conflict="domain,linkedin_url,batch_number"
+                    ).execute()
+                sb.table("contact_gaps").update({
+                    "phantombuster_status": "completed",
+                    "contacts_found":       len(contacts),
+                    "completed_at":         now_iso,
+                }).eq("id", gap["id"]).execute()
+                _update_campaign_counts(gap["domain"], gap["batch_number"], len(contacts), "linkedin")
+                completed += 1
+                logger.info("contact_gaps: completed for %s → %d contacts", gap["domain"], len(contacts))
         except Exception as exc:
-            logger.error("contact_gaps: poll_phase2 error for %s: %s", row["domain"], exc)
+            logger.error("contact_gaps: poll_phase2 error on container %s: %s", container_id, exc)
 
     return completed
 
@@ -459,6 +488,33 @@ async def _run_contact_gaps_bg(batch_number: int) -> None:
 async def run_contact_gaps(batch_number: int, background_tasks: BackgroundTasks):
     background_tasks.add_task(_run_contact_gaps_bg, batch_number)
     return {"status": "started", "batch_number": batch_number}
+
+
+@router.get("/pipelines/contact-gaps/sales-nav-csv")
+async def sales_nav_csv(ids: str):
+    """Public CSV endpoint that PhantomBuster's Sales Nav Search Export fetches when
+    we batch 5 URLs per launch (inputType=spreadsheetUrl).  Takes a comma-separated
+    list of contact_gaps row ids and returns a single-column CSV of their
+    sales_nav_urls.
+
+    No auth — PB fetches anonymously.  The URLs themselves are non-secret
+    LinkedIn Sales Navigator search URLs."""
+    from fastapi.responses import Response
+    id_list = [s.strip() for s in (ids or "").split(",") if s.strip()]
+    if not id_list:
+        return Response("salesNavigatorSearchUrl\n", media_type="text/csv")
+    rows = fetch_all(
+        "contact_gaps", "id,sales_nav_url",
+        filters=[("in_", "id", id_list)],
+    )
+    # Preserve the requested order so PB processes them deterministically
+    by_id = {str(r["id"]): r for r in rows}
+    lines = ["salesNavigatorSearchUrl"]
+    for rid in id_list:
+        r = by_id.get(rid)
+        if r and r.get("sales_nav_url"):
+            lines.append(r["sales_nav_url"])
+    return Response("\n".join(lines) + "\n", media_type="text/csv")
 
 
 @router.post("/pipelines/contact-gaps/run-latest")
