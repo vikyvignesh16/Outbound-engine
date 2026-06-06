@@ -15,13 +15,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# Toggle to re-enable outbound content generation. Paused while we review the
+# emailless-contact / LinkedIn-only-outreach flow and decide what to do about
+# the bad-LinkedIn-URL companies (now archived in contact_gaps_failed).
+CONTENT_GENERATION_ENABLED = False
+
+
 async def _run_daily_bg() -> None:
     try:
         crm     = await run_crm_check()
         rules   = await run_qualification_rules()
         tech    = await run_technographic()
         enrich     = await submit_enrichment()
-        content    = await submit_content()
+        if CONTENT_GENERATION_ENABLED:
+            content = await submit_content()
+        else:
+            content = {"status": "paused", "submitted": 0, "batches": 0, "batch_ids": []}
+            logger.info("daily_runner: content generation skipped (CONTENT_GENERATION_ENABLED=False)")
         prioritize = await run_prioritize()
 
         # Pipeline health snapshot
@@ -56,7 +66,12 @@ async def _run_daily_bg() -> None:
 
         tech_line   = "0 pending (all covered ✅)" if tech["processed"] == 0   else f"+{tech['processed']:,} processed"
         enrich_line = "0 pending (all covered ✅)" if enrich["submitted"] == 0  else f"{enrich['submitted']:,} submitted ({enrich['batches']} batches)"
-        content_line = "0 contacts pending"        if content["submitted"] == 0 else f"{content['submitted']:,} submitted ({content['batches']} batches)"
+        if not CONTENT_GENERATION_ENABLED:
+            content_line = "⏸️ paused (CONTENT_GENERATION_ENABLED=False)"
+        elif content["submitted"] == 0:
+            content_line = "0 contacts pending"
+        else:
+            content_line = f"{content['submitted']:,} submitted ({content['batches']} batches)"
 
         monthly_line = ""
         if date.today().day == 1:

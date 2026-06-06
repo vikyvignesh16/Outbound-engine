@@ -1,13 +1,17 @@
-"""Daily scoring of PhantomBuster-sourced contacts via Claude Batch API.
+"""Claude-driven scoring of PhantomBuster-sourced contacts.
 
-Flow:
-  1. Find unscored rows in phantombuster_contacts (scored_at IS NULL).
-  2. Submit them as a single Claude Batch API request — one prompt per contact,
-     scoring the job title against Brevo's ICP rubric (1-5).
-  3. Poll the batch until status == "ended".
-  4. Update each phantombuster_contacts row with relevance_score + reasoning + scored_at.
-  5. For score >= PROMOTION_THRESHOLD, upsert into sourced_contacts (preferring
-     existing Clay records, never overwriting them with PB data).
+Two stages, deliberately split so the user can review qualified candidates before
+they hit sourced_contacts:
+
+  1. score_contacts()   — score every unscored phantombuster_contacts row on TWO
+                          dimensions (relevance + seniority).  No promotion.
+  2. preview_top_n()    — read-only: top N per domain where relevance >= 3,
+                          ordered by (relevance DESC, seniority DESC).
+  3. promote_top_n()    — write the same top-N selection to sourced_contacts.
+
+The split exists because high-volume retailers (Marks & Spencer returned 360 PB
+contacts) need a relevance+seniority ranking — picking any-10-with-score>=3 was
+leaving Head of CRM (5/5) behind Lifecycle CRM Manager (5/3) in some domains.
 """
 import json
 import logging
@@ -29,7 +33,8 @@ PROMPT_TEMPLATE = """You are a sales targeting analyst for Brevo, a CRM and mark
 automation platform for B2B and B2C companies.
 
 Your job is to score how relevant a contact is as an outbound
-target for Brevo based solely on their job title.
+target for Brevo based solely on their job title, on TWO independent
+dimensions: relevance and seniority.
 
 Brevo's ideal contacts are people who own, influence, or make
 decisions about email marketing, CRM, customer communications,
@@ -39,7 +44,9 @@ Contact details:
 - Job title: {title}
 - Company name: {company}
 
-Score this contact 1-5 using the following scale:
+===============================================================
+RELEVANCE_SCORE (1-5) — how well their function fits Brevo's ICP
+===============================================================
 
 5 — Direct owner
 Directly owns and operates email, CRM, marketing automation,
@@ -71,25 +78,56 @@ No connection to marketing, CRM, or customer communications.
 Examples: Sales Manager, HR Director, Finance Manager, Engineer,
 Operations Manager, Customer Support, Office Manager
 
-Rules:
+Rules for relevance_score:
 - Score based on the job title alone — company fit is already confirmed
-- If the title is ambiguous, score based on the most likely
-  interpretation of the role
+- If ambiguous, score the most likely interpretation of the role
 - If the title is generic (e.g. "Manager", "Director") with no
   department context, score 1
 - Paid, performance, and acquisition-focused titles score maximum 2
   regardless of seniority
+
+===============================================================
+SENIORITY_SCORE (1-5) — how senior the person is, independent of function
+===============================================================
+
+5 — C-suite / Head of
+CEO, COO, CMO, CRO, Chief X Officer, Founder, Owner, Head of <function>
+
+4 — Director / VP
+Director, Senior Director, VP, SVP, EVP
+
+3 — Senior Manager / Lead
+Senior Manager, Lead, Principal, Team Lead, Group Manager
+
+2 — Manager
+Manager, Specialist, Senior Specialist (without Lead/Principal)
+
+1 — Executive / IC / Coordinator / Assistant
+Executive, Assistant, Coordinator, Associate, Analyst, Intern,
+Apprentice, or any title with no clear leadership indicator
+
+Rules for seniority_score:
+- Score the seniority signal in the title alone
+- "Head of X" → 5 even if X is a niche area
+- "Senior X" where X is an IC title (e.g. Senior Marketing Executive)
+  → 1, not 3. "Senior" alone is not a leadership signal.
+- "Lead X" or "X Lead" → 3
+- If the title gives no seniority signal at all, score 2
+
+===============================================================
 
 Return your answer in this exact JSON format with no preamble, no
 markdown code fences, and no text outside it:
 
 {{
   "relevance_score": 0,
+  "seniority_score": 0,
   "reasoning": ""
 }}"""
 
 MODEL = "claude-haiku-4-5-20251001"
-PROMOTION_THRESHOLD = 3   # score >= 3 promotes to sourced_contacts
+RELEVANCE_THRESHOLD = 3   # relevance_score >= this is eligible for promotion
+DEFAULT_TOP_N       = 10  # cap per domain
 
 
 def _client() -> anthropic.Anthropic:
@@ -111,8 +149,11 @@ def _extract_json(text: str) -> dict:
         return {}
 
 
+# ── Stage 1: scoring ───────────────────────────────────────────────────────────
+
 def score_contacts(batch_number: int | None = None) -> dict:
-    """Submit unscored phantombuster_contacts to Claude Batch API, persist scores."""
+    """Submit unscored phantombuster_contacts to Claude Batch API, persist
+    relevance + seniority scores. No promotion."""
     filters: list = [("is_", "scored_at", "null")]
     if batch_number is not None:
         filters.append(("eq", "batch_number", batch_number))
@@ -124,7 +165,7 @@ def score_contacts(batch_number: int | None = None) -> dict:
     )
     if not rows:
         logger.info("score_contacts: nothing to score")
-        return {"status": "ok", "scored": 0, "promoted": 0}
+        return {"status": "ok", "scored": 0}
 
     client = _client()
     reqs = []
@@ -137,7 +178,7 @@ def score_contacts(batch_number: int | None = None) -> dict:
             "custom_id": f"pbc_{r['id']}",
             "params": {
                 "model": MODEL,
-                "max_tokens": 200,
+                "max_tokens": 250,
                 "messages": [{"role": "user", "content": prompt}],
             },
         })
@@ -146,106 +187,164 @@ def score_contacts(batch_number: int | None = None) -> dict:
     batch = client.messages.batches.create(requests=reqs)
     logger.info("score_contacts: batch id %s", batch.id)
 
-    # Poll
     while True:
         b = client.messages.batches.retrieve(batch.id)
         if b.processing_status == "ended":
             break
         time.sleep(10)
 
-    # Persist scores
     sb = get_supabase()
-    rows_by_id = {str(r["id"]): r for r in rows}
     scored = 0
     now_iso = datetime.now(timezone.utc).isoformat()
-    promoted_ids: list[str] = []
     for line in client.messages.batches.results(batch.id):
         if line.result.type != "succeeded":
             logger.warning("score_contacts: %s failed: %s", line.custom_id, line.result)
             continue
         contact_id = line.custom_id.replace("pbc_", "")
         parsed = _extract_json(line.result.message.content[0].text)
-        score = parsed.get("relevance_score")
+        relevance = parsed.get("relevance_score")
+        seniority = parsed.get("seniority_score")
         reasoning = parsed.get("reasoning")
-        if not isinstance(score, int):
-            logger.warning("score_contacts: invalid score for %s: %s", contact_id, parsed)
+        if not isinstance(relevance, int) or not isinstance(seniority, int):
+            logger.warning("score_contacts: invalid scores for %s: %s", contact_id, parsed)
             continue
         sb.table("phantombuster_contacts").update({
-            "relevance_score":     score,
+            "relevance_score":     relevance,
+            "seniority_score":     seniority,
             "relevance_reasoning": reasoning,
             "scored_at":           now_iso,
         }).eq("id", contact_id).execute()
         scored += 1
-        if score >= PROMOTION_THRESHOLD:
-            promoted_ids.append(contact_id)
 
-    promoted = _promote_to_sourced_contacts(promoted_ids)
-    logger.info("score_contacts: scored=%d, promoted=%d", scored, promoted)
-
-    return {
-        "status":   "ok",
-        "scored":   scored,
-        "promoted": promoted,
-        "batch_id": batch.id,
-    }
+    logger.info("score_contacts: scored=%d", scored)
+    return {"status": "ok", "scored": scored, "batch_id": batch.id}
 
 
-def _promote_to_sourced_contacts(pbc_ids: list[str]) -> int:
-    """Upsert each promoted PB contact into sourced_contacts. Prefers existing
-    Clay-sourced records: if a (domain, email) row already exists with source='clay',
-    we do NOT overwrite it. Marks promoted_to_sourced_contacts=true in either case."""
-    if not pbc_ids:
-        return 0
-    sb = get_supabase()
-    promoted = 0
+# ── Stage 2: preview top-N per domain ──────────────────────────────────────────
+
+def preview_top_n_per_domain(
+    batch_number: int | None = None,
+    n: int = DEFAULT_TOP_N,
+    threshold: int = RELEVANCE_THRESHOLD,
+) -> dict:
+    """Read-only: return the candidate list that would be promoted, grouped by
+    domain, ordered by (relevance DESC, seniority DESC, job_title)."""
+    filters: list = [
+        ("eq", "promoted_to_sourced_contacts", False),
+        ("gte", "relevance_score", threshold),
+    ]
+    if batch_number is not None:
+        filters.append(("eq", "batch_number", batch_number))
 
     rows = fetch_all(
         "phantombuster_contacts",
-        "id,domain,company_name,market,batch_number,first_name,last_name,job_title,"
-        "linkedin_url,email,raw,relevance_score,relevance_reasoning",
-        filters=[("in_", "id", pbc_ids)],
+        "id,domain,company_name,first_name,last_name,job_title,linkedin_url,"
+        "relevance_score,seniority_score,relevance_reasoning",
+        filters=filters,
     )
 
+    by_domain: dict[str, list[dict]] = {}
     for r in rows:
-        # Honour Clay precedence: if a Clay-sourced contact already exists, skip overwrite
-        skip_upsert = False
-        if r.get("email"):
-            existing = sb.table("sourced_contacts").select("id,source").eq(
-                "domain", r["domain"]
-            ).eq("email", r["email"]).limit(1).execute().data
-            if existing and existing[0].get("source") == "clay":
-                skip_upsert = True
+        by_domain.setdefault(r["domain"], []).append(r)
 
-        if not skip_upsert:
-            sourced_row = {
-                "domain":              r["domain"],
-                "company_name":        r["company_name"],
-                "market":              r["market"],
-                "batch_number":        r["batch_number"],
-                "source":              "linkedin",
-                "email":               r.get("email"),
-                "first_name":          r.get("first_name"),
-                "last_name":           r.get("last_name"),
-                "job_title":           r.get("job_title"),
-                "linkedin_url":        r.get("linkedin_url"),
-                "relevance_score":     r.get("relevance_score"),
-                "relevance_reasoning": r.get("relevance_reasoning"),
-                "raw":                 r.get("raw"),
-            }
-            # If email is null we can't dedupe via (domain, email); fall back to insert
+    qualified: dict[str, list[dict]] = {}
+    for domain, items in by_domain.items():
+        items.sort(
+            key=lambda x: (
+                -(x.get("relevance_score") or 0),
+                -(x.get("seniority_score") or 0),
+                (x.get("job_title") or "").lower(),
+            )
+        )
+        qualified[domain] = items[:n]
+
+    total = sum(len(v) for v in qualified.values())
+    return {
+        "status":     "ok",
+        "domains":    len(qualified),
+        "candidates": total,
+        "qualified":  qualified,
+    }
+
+
+# ── Stage 3: promote top-N per domain ─────────────────────────────────────────
+
+def promote_top_n_per_domain(
+    batch_number: int | None = None,
+    n: int = DEFAULT_TOP_N,
+    threshold: int = RELEVANCE_THRESHOLD,
+) -> dict:
+    """Write the top-N qualified contacts per domain to sourced_contacts.
+
+    Clay precedence: if a (domain, email) row already exists with source='clay',
+    we skip the upsert (PB never overwrites Clay-sourced contacts). The PB row
+    is still marked promoted_to_sourced_contacts=true so it falls out of future
+    runs."""
+    preview = preview_top_n_per_domain(batch_number, n, threshold)
+    qualified = preview["qualified"]
+    if not qualified:
+        return {"status": "ok", "promoted": 0, "domains": 0}
+
+    sb = get_supabase()
+    promoted_count = 0
+    pbc_ids_to_mark: list[str] = []
+
+    for domain, items in qualified.items():
+        # Get the full row (incl. raw/email/market/batch_number) for each candidate
+        ids = [i["id"] for i in items]
+        full = fetch_all(
+            "phantombuster_contacts",
+            "id,domain,company_name,market,batch_number,first_name,last_name,"
+            "job_title,linkedin_url,email,raw,relevance_score,seniority_score,"
+            "relevance_reasoning",
+            filters=[("in_", "id", ids)],
+        )
+        for r in full:
+            skip_upsert = False
             if r.get("email"):
-                sb.table("sourced_contacts").upsert(
-                    sourced_row, on_conflict="domain,email"
-                ).execute()
-            else:
-                sb.table("sourced_contacts").insert(sourced_row).execute()
-            promoted += 1
+                existing = sb.table("sourced_contacts").select("id,source").eq(
+                    "domain", r["domain"]
+                ).eq("email", r["email"]).limit(1).execute().data
+                if existing and existing[0].get("source") == "clay":
+                    skip_upsert = True
 
+            if not skip_upsert:
+                sourced_row = {
+                    "domain":              r["domain"],
+                    "company_name":        r["company_name"],
+                    "market":              r["market"],
+                    "batch_number":        r["batch_number"],
+                    "source":              "linkedin",
+                    "email":               r.get("email"),
+                    "first_name":          r.get("first_name"),
+                    "last_name":           r.get("last_name"),
+                    "job_title":           r.get("job_title"),
+                    "linkedin_url":        r.get("linkedin_url"),
+                    "relevance_score":     r.get("relevance_score"),
+                    "seniority_score":     r.get("seniority_score"),
+                    "relevance_reasoning": r.get("relevance_reasoning"),
+                    "raw":                 r.get("raw"),
+                }
+                if r.get("email"):
+                    sb.table("sourced_contacts").upsert(
+                        sourced_row, on_conflict="domain,email"
+                    ).execute()
+                else:
+                    sb.table("sourced_contacts").insert(sourced_row).execute()
+                promoted_count += 1
+
+            pbc_ids_to_mark.append(r["id"])
+
+    if pbc_ids_to_mark:
         sb.table("phantombuster_contacts").update({
             "promoted_to_sourced_contacts": True,
-        }).eq("id", r["id"]).execute()
+        }).in_("id", pbc_ids_to_mark).execute()
 
-    return promoted
+    return {
+        "status":   "ok",
+        "domains":  len(qualified),
+        "promoted": promoted_count,
+    }
 
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
@@ -257,7 +356,8 @@ async def _run_score_bg(batch_number: int | None) -> None:
             await notify(
                 f"🧠 *Contact scoring complete*\n"
                 f"• Scored: {result['scored']}\n"
-                f"• Promoted to sourced_contacts: {result['promoted']}"
+                f"• Next step: GET /pipelines/score-contacts/preview to review "
+                f"top-{DEFAULT_TOP_N}-per-domain before promotion"
             )
         else:
             logger.info("score_contacts: no rows to score, skipping Slack notification")
@@ -268,6 +368,36 @@ async def _run_score_bg(batch_number: int | None) -> None:
 
 @router.post("/pipelines/score-contacts")
 async def score_contacts_endpoint(background_tasks: BackgroundTasks, batch_number: int | None = None):
-    """Daily cron: score all unscored phantombuster_contacts and promote score >= 3."""
+    """Daily cron: score all unscored phantombuster_contacts on relevance + seniority.
+    Does NOT promote — call /pipelines/score-contacts/promote after review."""
     background_tasks.add_task(_run_score_bg, batch_number)
     return {"status": "started", "batch_number": batch_number}
+
+
+@router.get("/pipelines/score-contacts/preview")
+def score_contacts_preview(
+    batch_number: int | None = None,
+    n: int = DEFAULT_TOP_N,
+    threshold: int = RELEVANCE_THRESHOLD,
+):
+    """Read-only preview of the top-N qualified contacts per domain that would
+    be promoted to sourced_contacts. Returns the full ranked list grouped by
+    domain so you can spot-check before calling /promote."""
+    return preview_top_n_per_domain(batch_number, n, threshold)
+
+
+@router.post("/pipelines/score-contacts/promote")
+async def score_contacts_promote(
+    batch_number: int | None = None,
+    n: int = DEFAULT_TOP_N,
+    threshold: int = RELEVANCE_THRESHOLD,
+):
+    """Promote the top-N qualified contacts per domain to sourced_contacts.
+    Synchronous (no background task) so the caller sees the count immediately."""
+    result = promote_top_n_per_domain(batch_number, n, threshold)
+    await notify(
+        f"✅ *Contact promotion complete*\n"
+        f"• Domains: {result['domains']}\n"
+        f"• Promoted to sourced_contacts: {result['promoted']}"
+    )
+    return result

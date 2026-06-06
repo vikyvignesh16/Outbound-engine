@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -24,9 +23,14 @@ def _get_client() -> anthropic.AsyncAnthropic:
     return anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 
-def _encode_custom_id(domain: str, email: str) -> str:
-    raw = f"{domain}||{email or ''}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:64]
+def _encode_custom_id(contact_id: str) -> str:
+    # Row-unique by sourced_contacts.id. The previous (domain, email) hash
+    # collided on emailless contacts at the same domain (sha256(domain||'')
+    # is identical), which Anthropic's Batch API rejects with
+    # "custom_ids must be unique within a batch". Keeping LinkedIn-only
+    # contacts in scope (no email but valid linkedin_url) requires per-row
+    # custom_ids — contact id is the natural choice.
+    return f"contact_{contact_id}"
 
 
 def _build_content_prompt(contact: dict, company: dict, resource: dict) -> str:
@@ -452,7 +456,7 @@ def _build_batch_requests(contacts: list[dict], company_map: dict) -> list[dict]
         company  = company_map.get((c["domain"], c.get("market") or ""), {})
         resource = select_resource(company)
         requests.append({
-            "custom_id": _encode_custom_id(c["domain"], c.get("email") or ""),
+            "custom_id": _encode_custom_id(c["id"]),
             "params": {
                 "model":      "claude-sonnet-4-6",
                 "max_tokens": 4000,
@@ -516,7 +520,7 @@ async def submit_content(limit: int | None = None) -> dict:
             requests=_build_batch_requests(chunk, company_map)
         )
         mapping = {
-            _encode_custom_id(c["domain"], c.get("email") or ""): {
+            _encode_custom_id(c["id"]): {
                 "contact_id": c["id"],
                 "email":      c.get("email"),
                 "domain":     c["domain"],
