@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 
 from db.client import get_supabase
 
@@ -45,11 +45,25 @@ def _parse_signal(body: dict) -> dict:
     }
 
 
+def _insert_signal(row: dict) -> None:
+    """Write to Supabase out-of-band so the webhook response isn't blocked.
+
+    Albacross's webhook client times out under 1 second; a synchronous
+    supabase-py insert takes ~700-900ms, which means ~5% of events were lost
+    to 499s and unhandled ClientDisconnect exceptions before this moved into
+    a BackgroundTask.
+    """
+    try:
+        get_supabase().table("albacross_signals").insert(row).execute()
+    except Exception:
+        logger.exception("albacross: insert failed for %s", row.get("domain"))
+
+
 @router.post("/webhooks/albacross")
-async def receive_albacross_event(request: Request):
+async def receive_albacross_event(request: Request, background_tasks: BackgroundTasks):
     body = await request.json()
     row = _parse_signal(body)
     logger.info("albacross_event: domain=%s market=%s segment=%s",
                 row["domain"], row["market"], row["segment_name"])
-    get_supabase().table("albacross_signals").insert(row).execute()
+    background_tasks.add_task(_insert_signal, row)
     return {"status": "ok"}
