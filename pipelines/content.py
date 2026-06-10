@@ -1,19 +1,57 @@
+"""Outbound sequence content generation via Claude Batch API.
+
+Two-step pipeline:
+  1. fetch_many() from pipelines/news_search.py pre-fetches recent company news
+     per unique domain (cached in company_news_cache, one fetch per domain ever).
+  2. submit_content() builds one Claude Batch request per pending sourced_contacts
+     row, embedding the contact + company + news + full Brevo resource library
+     into the master prompt. The AI selects two resources per contact
+     (Email 2 case study, Email 3 report/ebook) and writes the 21-key sequence
+     output as a single JSON object.
+
+After parsing each result we:
+  • Override email_1_lp_teaser with the canonical anchor text (the prompt asks
+    the model to always write this string verbatim, but we own it server-side).
+  • Split four "CTA paragraphs" (email_1_p3, email_2_p2, email_3_p2, email_4_p2)
+    into body + cta columns. Lemlist wraps the cta column as the anchor for
+    its campaign-level link variable; we don't want raw URLs in the email body.
+
+Final outbound_content jsonb stored on sourced_contacts contains the 21 model
+keys plus 8 derived split columns (4 bodies + 4 ctas).
+"""
 import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 import anthropic
 from fastapi import APIRouter, HTTPException
 
 from db.client import get_supabase, fetch_all
-from pipelines.resource_tool import select_resource
+from pipelines.news_search import fetch_many as fetch_news_many
+from pipelines.lp_generator import fetch_many as fetch_lp_many
+from pipelines.resource_tool import get_all_resources
 from utils.slack import notify
 
 _BATCH_INPUT_COST_PER_TOKEN  = 1.50 / 1_000_000
 _BATCH_OUTPUT_COST_PER_TOKEN = 7.50 / 1_000_000
 _BATCH_SIZE = 500
+
+# Canonical anchor text — the model is told to always write this verbatim, but
+# we override server-side so a single misread by the model doesn't break the
+# Lemlist link mapping.
+_LP_TEASER = "Here is what your customer journey could look like with everything connected"
+
+# Paragraphs whose final sentence becomes a Lemlist-wrapped anchor link.
+# (source key, derived body key, derived cta key)
+_CTA_SPLITS = [
+    ("email_1_paragraph_3", "email_1_p3_body", "email_1_p3_cta"),
+    ("email_2_paragraph_2", "email_2_p2_body", "email_2_p2_cta"),
+    ("email_3_paragraph_2", "email_3_p2_body", "email_3_p2_cta"),
+    ("email_4_paragraph_2", "email_4_p2_body", "email_4_p2_cta"),
+]
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,419 +63,266 @@ def _get_client() -> anthropic.AsyncAnthropic:
 
 def _encode_custom_id(contact_id: str) -> str:
     # Row-unique by sourced_contacts.id. The previous (domain, email) hash
-    # collided on emailless contacts at the same domain (sha256(domain||'')
-    # is identical), which Anthropic's Batch API rejects with
-    # "custom_ids must be unique within a batch". Keeping LinkedIn-only
-    # contacts in scope (no email but valid linkedin_url) requires per-row
-    # custom_ids — contact id is the natural choice.
+    # collided on emailless contacts at the same domain. Contact id keeps
+    # LinkedIn-only contacts in scope without collisions.
     return f"contact_{contact_id}"
 
 
-def _build_content_prompt(contact: dict, company: dict, resource: dict) -> str:
-    return f"""You are a B2B outbound copywriter for Brevo. Generate a personalised
-outbound sequence for one contact. Return everything as a single JSON object.
-
----
-
-## Contact and company data
-
-- first_name: {contact.get('first_name', '')}
-- job_title: {contact.get('job_title', '')}
-- company_name: {company.get('company_name') or contact.get('company_name', '')}
-- vertical: {company.get('vertical', '')}
-- esp_detected: {company.get('esp_detected', 'unknown')}
-- esp_score: {company.get('esp_score', 0)}
-- email_crm_activity: {company.get('email_crm_activity', '')}
-- account_narrative: {company.get('account_narrative', '')}
-- relevance_score: {company.get('account_fit_score', 3)}
-- has_loyalty_program: {company.get('has_loyalty_program', False)}
-- needs_cdp: {company.get('needs_cdp', False)}
-- has_wallet: {company.get('has_wallet', False)}
-
-## Selected resource
-
-- resource.company: {resource.get('company')}
-- resource.title: {resource.get('title')}
-- resource.type: {resource.get('type')}
-- resource.industry: {resource.get('industry')}
-- resource.key_metrics: {resource.get('key_metrics')}
-- resource.context: {resource.get('context')}
-- resource.pain_points: {resource.get('pain_points')}
-
----
-
-## Global rules — apply to everything
-
-DASHES — ABSOLUTE RULE. Zero tolerance.
-  Never use em dash (—), en dash (–), or a hyphen as a
-  pause or connector in any sentence in any email or
-  LinkedIn content. This includes constructions like
-  "X — Y", "X – Y", or "fast-growing" used as a pause.
-  If you are tempted to use a dash, rewrite the sentence
-  as two separate sentences or use a comma instead.
-  Wrong: "They run loyalty and wallet — two systems."
-  Right: "They run loyalty and wallet through two systems."
-  Scan your output before returning. If you find a dash,
-  rewrite that sentence.
-
-- Casual, human tone. Write at a 5th-grade reading level.
-  Slightly uncertain is better than confident and salesy.
-- Never use the word "brand" or "brands"
-- No exclamation marks
-- Never start a sentence with "I just wanted to",
-  "I know you're busy", or "I hope this finds you well"
-- Do not quote input fields directly — use them as context
-- You:I ratio — write more "you/your" sentences than
-  "I/we/our" sentences in every email. Before outputting,
-  check the ratio. If you have more I/we sentences, rewrite.
-- One to two sentences per paragraph maximum.
-  Write for mobile — a desktop paragraph becomes
-  four lines on a phone.
-- Each complete email (all paragraphs combined) must be
-  75 to 125 words. Count before outputting. Cut if over.
-  Email 4 must be 50 to 80 words — short is the point.
-- CTA rule — the single most important rule:
-  Never ask for time or a meeting in a cold email.
-  Every CTA must be interest-based ("Is this on your
-  radar?") or offer-based ("Worth sending over?").
-  Save calendar asks for replies and active deals.
-  The CTA is always the last sentence and always serves
-  as the anchor text for a Lemlist template variable.
-- Never generate or include URLs —
-  {{cta_book_call}}, {{case_study_url}}, and {{report_url}}
-  are Lemlist variables. Write only the anchor text.
-- Metrics rule — never lead with ROI numbers.
-  Metrics first appear in email 2 as a story element.
-  They reappear in linkedin_message_2 and email 4 only.
-  Email 1 and email 3 contain no metrics.
-- Never pitch Brevo features as a list. Brevo appears
-  once in email 1 (bridge sentence only), naturally in
-  email 2, and not at all in email 3 or email 4.
-
----
-
-## EMAIL 1 — Day 1 — PAS framework (Problem, Agitate, Solve)
-
-### subject_line_1
-
-Format rules (apply to all four subject lines):
-- 2 to 6 words, all lowercase
-- No punctuation except ? and —
-- No first names
-- No verbs as the opening word
-- No superlatives or adjectives
-- Must read like an internal email between colleagues,
-  not a marketing email
-
-Signal priority — pick the first that applies:
-
-1. esp_detected is present AND is contact-based
-   (Mailchimp, Klaviyo, or similar):
-   → "paying per contact at [company_name]?"
-
-2. esp_detected is present (any other ESP):
-   → "[company_name]'s [esp_detected] setup"
-
-3. has_loyalty_program is true, no ESP detected:
-   → "[company_name]'s loyalty comms"
-
-4. needs_cdp is true:
-   → "fragmented data at [company_name]?"
-
-5. email_crm_activity is present:
-   → "your transactional email setup"
-
-6. No signals available:
-   → "question on your ESP"
-
----
-
-### email_1_paragraph_1 — Observed signal hook
-
-Open with something specific you noticed about them,
-drawn from their signals. This is what makes it feel
-researched, not templated.
-
-Rules:
-- 1 to 2 sentences
-- Must be about THEM, not about Brevo
-- Reference one of their signals directly as an observation:
-    If esp_detected: reference the ESP by name and what
-      that likely means for their sending volume at scale
-      (use approximate language: "sending at volume",
-      "a lot of transactional sends", "thousands of
-      contacts" — never exact numbers)
-    If has_loyalty_program: reference what running a
-      loyalty programme at their scale means for comms
-      volume (approximate language only)
-    If has_wallet: reference what wallet activity implies
-      about their transactional send volume
-    If email_crm_activity: use it as the specific
-      observation — paraphrase, never quote directly
-    If no signals: use account_narrative to surface
-      something specific about their communication layer
-- No Brevo mention
-- No metrics
-- Do not open with "I noticed" or "I saw" — instead open
-  with the observation itself as a statement of fact
-
----
-
-### email_1_paragraph_2 — Agitate
-
-Expand why this problem is harder than it looks for
-a company like theirs.
-
-Rules:
-- 1 to 2 sentences
-- Flow directly from paragraph 1
-- No Brevo mention
-- No metrics
-- If esp_detected is present and esp_score >= 75:
-    Reference esp_detected by name and the specific
-    friction it creates at their scale
-  If esp_detected is present and esp_score < 75:
-    Reference the category of pain generically,
-    not the tool name
-  If esp_detected is null:
-    Use account_narrative to surface the friction
-    common to companies like theirs at this stage
-
----
-
-### email_1_paragraph_3 — Solve (bridge only)
-
-One sentence naming Brevo as relevant to this pain.
-Then one sentence CTA — interest-based, not a meeting ask.
-
-Rules:
-- 2 sentences total, no more
-- Brevo appears once, as a bridge — not a product pitch
-- Shape the Brevo angle using signals:
-    has_loyalty_program = true: loyalty and CRM unification
-    needs_cdp = true: unified customer data view
-    has_wallet = true: wallet and channel integration
-    all false: email and CRM in one place
-- CTA anchor text wraps {{cta_book_call}}
-  Frame it as an interest question, not a meeting invite.
-  Example: "Is this something on your radar this year?"
-  or "Worth a conversation to see if it applies?"
-
----
-
-## LINKEDIN — Day 3 — Direct message (no connection note)
-
-### linkedin_message_1
-
-Send directly after connecting — no note on the
-connection request itself.
-
-Rules:
-- 2 to 3 sentences
-- Warm, human — they just connected, treat it as such
-- No Brevo mention, no meeting ask
-- Open with something specific about their vertical
-  or role, not a generic opener
-- Always use "I work with" not "working with"
-- Every sentence must have a subject and verb
-- End with an open question that invites a reply,
-  does not demand one
-
----
-
-## EMAIL 2 — Day 7 — BAB framework (Before, After, Bridge)
-
-### subject_line_2
-
-Different signal from subject_line_1 — skip whichever
-signal was already used. Signal priority:
-
-1. has_loyalty_program true AND has_wallet false:
-   → "loyalty + wallet — are they connected?"
-
-2. has_wallet true:
-   → "your rewards program emails"
-
-3. needs_cdp true (if not used in subject_line_1):
-   → "fragmented data at [company_name]?"
-
-4. Default:
-   → "transactional + marketing — one stack?"
-
----
-
-### email_2_paragraph_1 — Before
-
-Put company_name in the before state. This is their
-current situation — the problem they are living with.
-
-Rules:
-- 1 to 2 sentences
-- No Brevo mention
-- No metrics yet — save them for paragraph 2
-- Use account_narrative and resource.pain_points as
-  context to make the before state feel accurate
-- Connect their situation to resource.company naturally —
-  explain the parallel without overstating it
-
----
-
-### email_2_paragraph_2 — After and Bridge
-
-Tell the case study story. Introduce the metric here
-for the first time. Bridge back to company_name.
-
-Rules:
-- 3 sentences maximum
-- Sentence 1: What resource.company changed (1 sentence)
-- Sentence 2: The result — write one metric from
-  resource.key_metrics as a narrative sentence, not
-  as a stat or bullet point. "X happened, which meant Y"
-  not "X% increase in Y"
-- Sentence 3: CTA — offer-based, wraps {{case_study_url}}
-  Example: "Worth seeing how they did it?" or
-  "The full story is here if it is useful"
-- Do not start this paragraph with "They"
-- Brevo can be mentioned naturally in sentence 1 or 2
-  as part of the story — not as a product pitch
-
----
-
-## EMAIL 3 — Day 12 — New pain point + resource
-
-This email must NOT feel like a follow-up or a
-content push. It surfaces a different pain from
-emails 1 and 2, then offers the resource as genuinely
-useful context for that pain.
-
-### subject_line_3
-
-Different signal from subject_line_1 and subject_line_2 —
-skip signals already used. Signal priority:
-
-1. has_loyalty_program true AND has_wallet false
-   (SMS gap angle, different from subject_line_2):
-   → "loyalty + SMS — are they connected?"
-
-2. Transactional angle (if not used in subject_line_2):
-   → "your transactional email setup"
-
-3. Default:
-   → "transactional + marketing — one stack?"
-
----
-
-### email_3_paragraph_1 — New pain point
-
-Surface a pain that was NOT covered in emails 1 or 2.
-Draw from signals not yet used:
-- If email 1 used ESP angle: use loyalty, wallet,
-  or CDP angle here
-- If email 1 used loyalty: use transactional or
-  deliverability angle here
-- If no unused signals: use a pain common to their
-  vertical drawn from account_narrative
-
-Rules:
-- 1 to 2 sentences
-- Write as an observation about their situation,
-  not a pitch
-- No Brevo mention
-- No metrics
-
----
-
-### email_3_paragraph_2 — Resource as context
-
-Connect the pain from paragraph 1 to resource.title
-as something relevant, then close with an offer CTA.
-
-Rules:
-- 1 to 2 sentences
-- Frame the resource as useful context for the pain,
-  not as "here is a piece of content"
-- Reference resource.title naturally — do not open
-  with the title as the first words
-- No Brevo mention
-- CTA wraps {{report_url}} — offer the resource,
-  not a meeting. Example: "Want me to send it over?"
-  or "Happy to share the full version if useful"
-
----
-
-## LINKEDIN — Day 13 — First message after connection
-
-### linkedin_message_2
-
-This is the first message sent after they accept the
-connection — warm, not a pitch.
-
-Rules:
-- 2 to 3 sentences
-- Lead with the strongest metric from resource.key_metrics
-  written as a narrative sentence — "X happened for Y"
-  not "X% increase"
-- Connect it to company_name or vertical in one sentence
-- Close with a warm open question — not a hard sell,
-  not a meeting ask
-- No Brevo mention
-
----
-
-## EMAIL 4 — Day 18 — Breakup email
-
-### subject_line_4
-
-Soft close — no signals needed. Pick the most natural:
-- "still open"
-- "last note"
-- "one more"
-
-No first names, no punctuation, 2 words max.
-
----
-
-### email_4_paragraph_1 — Binary choice
-
-Rules:
-- 1 to 2 sentences
-- Acknowledge no reply without guilt or pressure
-- Offer a clear binary: not a priority right now
-  and I will stop, or worth a short conversation
-- No Brevo mention, no features
-
----
-
-### email_4_paragraph_2 — Final hook and soft close
-
-Re-use the same metric from email 2 as the final hook,
-framed as what they would be leaving on the table.
-Then a soft door-open CTA.
-
-Rules:
-- 2 sentences maximum
-- Sentence 1: The metric from email 2, reframed as
-  an opportunity cost — "companies doing X are seeing Y"
-  written as a narrative, not a stat
-- Sentence 2: Soft CTA wrapping {{cta_book_call}} —
-  leave the door open without pressure
-  Example: "If the timing ever works, you can find
-  a time here" or "Here if it ever makes sense"
-
----
-
-## Output format
-
-Return a single JSON object with exactly these keys.
-No preamble, no reasoning, no markdown fences.
-
-{{
+_SYSTEM = (
+    "You are a B2B copywriter. Output ONLY the raw JSON object requested. "
+    "No reasoning, no analysis, no markdown fences, no preamble. "
+    "Start your response with { and end with }."
+)
+
+
+def _news_instruction(news: dict) -> str:
+    """Build the per-contact `newsInstruction` injected into the prompt.
+
+    If the news search found something usable, we tell the model to use the
+    "I came across..." opener with the summary. Otherwise we tell it to fall
+    back to the signal-priority waterfall in the Email 1 P1 section.
+    """
+    if news.get("found") and news.get("usable") and news.get("news_summary"):
+        return (
+            f"Recent news found (type: {news.get('news_type') or 'other'}): "
+            f"{news['news_summary']}\n"
+            "Use this in Email 1 paragraph 1 with the \"I came across...\" framing. "
+            "Connect the news to a specific operational tension or challenge — never "
+            "restate facts the prospect already knows about their own company."
+        )
+    return (
+        "No recent qualifying news found. Use the signal priority waterfall in "
+        "the Email 1 P1 rules below (esp_detected, has_loyalty_program, has_wallet, "
+        "email_crm_activity, or account_narrative)."
+    )
+
+
+# Master content-generation prompt body. Variables are $-substituted via
+# string.Template at build time. The full RESOURCES catalogue is injected
+# as JSON so the model can read and select two resources per contact.
+_PROMPT_TEMPLATE = """You are a B2B outbound copywriter for Brevo. Generate a personalised outbound sequence AND select the two best resources from the library below. Return ONLY a single JSON object. No preamble, no markdown.
+
+## Contact & Company Data
+- first_name: $first_name
+- last_name: $last_name
+- job_title: $job_title
+- market: $market
+- company_name: $company_name
+- vertical: $vertical
+- esp_detected: $esp_detected
+- esp_score: $esp_score
+- account_fit_score: $account_fit_score
+- relevance_score: $relevance_score
+- has_loyalty_program: $has_loyalty_program
+- needs_cdp: $needs_cdp
+- has_wallet: $has_wallet
+- account_narrative: $account_narrative
+- email_crm_activity: $email_crm_activity
+
+## Live News
+$news_instruction
+
+## Hardcoded Resource Library
+$resources_json
+
+## Resource Selection Rules
+Select TWO resources. They must always be different assets.
+
+EMAIL 2 RESOURCE — must be a case_study. Priority (first match wins):
+1. has_wallet + has_loyalty_program + hospitality/food_beverage/restaurants → buffalo-grill-repeat-visits or cafe-kitsune-loyalty
+2. has_wallet + has_loyalty_program + beauty/cosmetics/wellness → loccitane-mobile-wallet
+3. has_wallet + has_loyalty_program + fashion/luxury → the-kooples-mobile-wallet or jacadi-mobile-wallet
+4. has_wallet + has_loyalty_program + sports/outdoor → salomon-google-wallet
+5. has_wallet + has_loyalty_program + retail (generic) → jacadi-mobile-wallet
+6. needs_cdp + quick_service_restaurants/food_beverage → kfc-cdp
+7. needs_cdp + retail/ecommerce → oliviers-co-cdp
+8. needs_cdp + fintech/payments → monisnap-automation
+9. has_loyalty_program only + aviation/travel → kenya-airways-loyalty
+10. has_loyalty_program only + travel/transport → suntransfers-revenue
+11. Default → marketing-orchestration-benchmark-2026
+
+EMAIL 3 RESOURCE — must be a report or ebook. Must differ from Email 2. Priority:
+1. has_wallet + has_loyalty_program → mobile-wallet-loyalty-ebook
+2. has_loyalty_program only → smart-loyalty-guide (preferred) or loyalty-benchmark-report
+3. needs_cdp + retail → cdp-use-cases-retail
+4. needs_cdp + other verticals → marketing-orchestration-benchmark-2026
+5. Default → marketing-orchestration-benchmark-2026
+
+## Voice — most important rule
+Write like you would talk to a friend who happens to work in marketing. Plain English, short words, short sentences. If a sentence has a word that you would not say out loud to a friend over coffee, swap it for something simpler.
+
+The reader is busy. They will give you five seconds. Anything that sounds like a LinkedIn post, a sales deck, or a consulting report will get deleted before they finish the first line.
+
+NEVER use these words or phrases. They are the smell of a generic sales email:
+- touchpoints
+- coordination layer / coordination gap
+- infrastructure (in any sense)
+- stack (when you mean tools or software)
+- syncing / synced / joined up / in sync (use plain words to describe what)
+- drift apart / drift / silently breaks / quietly stops working
+- at their scale / at scale / at this scale (just say the number or skip it)
+- customer journey
+- customer experience
+- lifecycle (in any combination — "lifecycle emails", "lifecycle communications", "lifecycle messaging", "lifecycle flows")
+- segmenting / segmentation (use "splitting customers into groups" or describe what specifically)
+- behaviour-triggered / trigger-based (use "send based on what someone did" or describe the action)
+- orchestration / orchestrated / orchestrating
+- activation / activate (in the marketing sense)
+- multi-channel / omnichannel
+- friction / tension / observable / signal (when you mean evidence)
+- lives in isolation / lives in silos (just describe what)
+- leverage / seamlessly / excited / thrilled / revolutionize / game-changer
+- brand / brands
+- "That's where X comes in"
+- "I wanted to reach out"
+- "I hope this finds you well"
+- "I know you're busy"
+No exclamation marks. Ever.
+
+Swap table — when you want to say:
+- "touchpoints" → "places customers see you" / "places customers hear from you"
+- "coordination" → describe what specifically (e.g. "making sure the offer in the email matches the one at the till")
+- "infrastructure" → "your setup" / "the tools you use"
+- "stack" → "your tools" / name the tool
+- "at their scale" → "across 1,000 shops" (be specific or skip)
+- "customer journey" → "what customers see" / "how a customer moves from X to Y"
+- "lifecycle communications" / "lifecycle emails" → "the emails you send over time" / "your automated emails" / describe the trigger ("the email a customer gets after they book")
+- "segmenting" / "segmentation" → "splitting customers into groups" or just describe what you mean ("sending one thing to repeat buyers and another to first-timers")
+- "behaviour-triggered" → "send based on what someone just did"
+- "drift apart" → name what specifically goes wrong
+- "lives in silos" → "lives in separate places"
+
+Voice test before outputting: read each sentence out loud. If it sounds like you are presenting on stage, rewrite it. If it sounds like you are explaining something to a friend, keep it.
+
+Examples — the wrong voice and the right voice for the same situation:
+
+WRONG (too corporate, too technical): "Adding new touchpoints in-store is straightforward enough, but syncing what happens in-store with what gets sent through Mandrill to One Stop Rewards members, at the scale of 1,000 plus locations, is where things tend to quietly drift apart."
+
+RIGHT (plain, conversational, specific): "Rolling out new tech in 1,000 shops is one thing. Making sure the offers people get from One Stop Rewards actually match what they just picked up at the till is another. That second bit is usually where things slip without anyone noticing."
+
+WRONG: "Each new location adds another layer of customer touchpoints, consultative follow-ups, and Travel Club communications that all need to feel joined up."
+
+RIGHT: "Every new branch is another set of emails, follow-up calls, and Travel Club nudges that need to feel like they are coming from one place rather than four."
+
+WRONG: "Your customer data is probably being generated in four different places and reassembled somewhere downstream."
+
+RIGHT: "What you know about a customer is probably split across the till, the app, the vet system, and the website. Pulling it all together to act on is the hard part."
+
+Write with texture. Real emails have an incomplete thought occasionally. A sentence starting with "And" or "But". An observation that does not immediately pivot to a solution.
+
+## Global Rules
+- Zero em dashes or en dashes. Use a comma or two sentences instead.
+- Plain English, 5th-grade reading level. If your sentence has more than 18 words, split it. If a word has more than three syllables and there is a shorter option, use the shorter option.
+- Never use abbreviations. Write "communications" not "comms", "programme" not "prog". Spell things out.
+- More "you/your" than "I/we/our" in every email. Count before outputting. EXCEPTION: Email 1 paragraph 1 when recent news is present — using "I came across", "I noticed", or "I saw" is permitted and encouraged to signal genuine research.
+- 1-2 sentences per paragraph. Write for mobile.
+- Emails 1-3: 75-125 words total. Email 4: 50-80 words. Count before outputting.
+- CTAs always interest-based or offer-based. NEVER ask for a meeting in a cold email. CTA is always the last sentence of the email.
+- The last sentence IS the anchor text. Lemlist converts it into a clickable link. Never include {cta_book_call}, {case_study_url}, {report_url}, or any variable in the copy. Write only the sentence. No placeholders. No brackets.
+- No metrics in Email 1 or Email 3. Metrics first appear in Email 2.
+- Brevo appears once in Email 1 (bridge sentence only using "Brevo specialises in"), naturally in Email 2, not at all in Email 3 or 4.
+
+## Email 1 — PAS — Day 1
+Subject line rules — these apply to all four emails:
+- 2-6 words, all lowercase, no punctuation except ?
+- No first names, no verbs as the opening word
+- Must hint at the pain this email addresses without explaining it
+- The prospect should feel a small gap that only opening the email closes
+- Must sound like an internal forward between colleagues, not a marketing subject line
+- Never describe a thing or name a concept — create a tension or imply a gap
+
+Quality test before outputting: Could this subject line have been sent unchanged to 1,000 other companies? If yes, rewrite it until it feels specific to their world.
+
+Subject line formula by email:
+EMAIL 1 subject: Hint at the communications or loyalty infrastructure pain. Never name the ESP directly. Never reference the news in the subject — the news belongs in the body. Default when ESP detected: "loyalty emails, a gap". Adapt to their vertical and signals.
+EMAIL 2 subject: Create a comparison or contrast that implies a better way exists. Style: "X vs Y" or "X without Y". Default: "loyalty app vs wallet card". Adapt to their vertical and signals.
+EMAIL 3 subject: Name what stops working or what is missing — not what the solution is. Default: "when reward points stop working". Adapt to their vertical and signals.
+EMAIL 4 subject: Always "last note". No variation. No adaptation.
+
+Bad subject examples (never produce these): "one stop franchise growth" / "points programmes plateau" / "loyalty strategy question" / "fragmented data" / any subject that describes rather than implies
+
+P1 — News or signal hook:
+CRITICAL RULE: Never repeat facts the prospect already knows about their own company. They know their store count. They know their expansion plans. They know their loyalty programme exists. Your job is not to inform them — it is to connect something you observed to a tension they feel but have not yet solved.
+
+If recent news was found: Open with "I came across..." or "I noticed..." or "I saw..." — this is the one place in the entire sequence where starting with "I" is not just permitted but required. It signals genuine research and human curiosity, not automation. Frame what you found as something that made you think of a specific operational challenge, not a restatement of facts they already know. 1-2 sentences. No Brevo. No metrics.
+Wrong: "One Stop plans to grow its franchise estate to 350 locations." (stating their own facts back at them)
+Right: "I came across the Snappy Shopper rollout across 250 stores — keeping One Stop Rewards consistent across that many franchise partners at that pace is the part that usually gets complicated." (research framing plus immediate pivot to the tension)
+If no news: Reference one signal as an observation about what it implies, not what it is. If esp_detected is present and esp_score >= 75, reference the ESP tool by name and what running loyalty, franchise communications, and transactional sends through it at their scale likely feels like. Approximate language only — never exact numbers. Open with the implication, not the fact. Wrong: "One Stop uses Mandrill for email." Right: "Running loyalty communications and transactional sends through Mandrill at the scale of 1,000+ stores starts to create gaps that are hard to see until something breaks."
+
+P2 — Agitate:
+Why this problem is harder than it looks for a company at their scale. 1-2 sentences. No Brevo. No metrics.
+If esp_detected is present and esp_score >= 75: Reference the ESP by name and the specific friction it creates when trying to coordinate loyalty, delivery, and franchise or multi-location communications through a single transactional tool. Make them feel the gap without saying "you should switch".
+If esp_detected present but esp_score < 75: Reference the category of pain generically without naming the tool.
+If no ESP: Use account_narrative to surface friction common to companies like theirs at this stage.
+
+Personalised LP teaser — sits between P2 and P3 as a standalone line. Output this in the email_1_lp_teaser field:
+Always write exactly: "Here is what your customer journey could look like with everything connected"
+This line never changes regardless of vertical or signals. No variable. No placeholder. Lemlist converts this line into the clickable link.
+
+P3 — Solve:
+2 sentences exactly. Sentence 1: "Brevo specialises in [specific angle drawn from signals]." Shape the angle: has_loyalty_program = coordinating loyalty and customer communications across channels; needs_cdp = unifying customer data into a single actionable view; has_wallet = connecting wallet, loyalty, and marketing channels; all false = email and CRM in one place. Sentence 2: interest-based CTA written as a single natural sentence. Never a meeting ask. This sentence IS the anchor text — Lemlist wraps it as a link. No variable. No placeholder. Just the sentence. Example: "Worth a conversation about how this applies to your rollout?"
+
+## LinkedIn 1 — Day 3
+2-3 sentences. Warm, human. No Brevo. No meeting ask. Specific to their vertical or role. Use "I work with" not "working with". End with an open question.
+
+## Email 2 — BAB — Day 7
+Use your selected Email 2 case study.
+Subject: Different signal from Email 1. No dashes. Options: "loyalty + wallet, are they connected?" / "your rewards programme emails" / "fragmented data at $company_name?" / "transactional + marketing, one stack?"
+
+STRUCTURE: This email has three completely separate parts. Write each one independently. Never blend them. Never let one sentence do the work of two parts.
+
+email_2_hook — ONE sentence only. Hard limit: 12 words maximum. This is the scroll-stopper. It names the core tension with no setup, no context, no explanation. It stands completely alone as its own visual block. The reader should feel the problem immediately without needing the paragraph below to understand it.
+Good: "Most loyalty programmes live in isolation." (6 words, names the tension, stands alone)
+Good: "Points accumulate. Customers still disappear." (5 words, creates a gap)
+Bad: "Most retail loyalty programmes exist in isolation because customers download an app but never engage beyond the first visit." (too long, explains itself, bleeds into P1)
+Bad: Any sentence that sets up or introduces the paragraph below.
+
+email_2_paragraph_1 — 1-2 sentences. The before state. Expand on the tension from the hook — why it is real and specific for a company like theirs at their scale. Draw from account_narrative and the selected resource pain_points. Do NOT repeat or paraphrase the hook sentence. No Brevo. No metrics.
+
+email_2_paragraph_2 — 2 sentences exactly, no more. Sentence 1: name the resource company, what they changed, and the key metric as a narrative "X happened, which meant Y" — never as a statistic or percentage standalone. Brevo can appear naturally in this sentence as part of the story. Sentence 2: offer-based CTA written as a single natural sentence. This sentence IS the anchor text — Lemlist wraps it as a link. No variable. No placeholder. Just the sentence. Example: "Here is how they made the switch"
+
+## Email 3 — Scenario + Resource — Day 12
+Use your selected Email 3 report or ebook.
+Subject: Different from Emails 1 and 2. Options: "loyalty + SMS, are they connected?" / "your transactional email setup" / "one thing worth seeing"
+
+P1 — Scenario story (2-3 sentences MAX):
+Drop the reader straight into a scene without any setup or preamble. Do NOT say "imagine" or "picture this". Do NOT add a contextual opener before the scene — the abruptness is intentional and breaks the pattern of a sales email. Open with a customer situation the prospect will recognise instantly from their own business. Specific to their vertical and sub-vertical. Reference their actual product or service context where possible. Shows a gap that smart engagement could close. No feature names. No Brevo. No metrics.
+
+Scenario library (select closest match, adapt specifically to their business and vertical):
+- Retail/Convenience: A customer picks up milk and a meal deal every Tuesday. No loyalty mechanic, no reason to choose you over the corner shop next time. A small points nudge tied to visit frequency, third visit this week earns double points, turns a habit into a preference.
+- Retail/Fashion: A customer buys a coat in October and disappears until the next sale. A challenge tied to something they already do, rate your last purchase to earn points, keeps the relationship alive without a discount.
+- Retail/Footwear: Customer buys boots in October. By January they have forgotten the company exists. A challenge tied to usage, complete 50km to unlock your next reward, turns a seasonal buyer into someone who checks in monthly.
+- Food/QSR: Someone orders because they have a voucher. No voucher, no return. A streak mechanic, three orders this month to unlock a free side, changes the relationship from transactional to habitual.
+- Food/Coffee: A regular gets their stamp card stamped but never redeems. A digital status tier, Latte to Matcha to Dark Coffee, gives them something to progress toward beyond a free drink.
+- Hospitality/Travel: Guest books once for a conference, never returns. A post-stay challenge tied to their preferences gives them a reason the next search starts with your name.
+- Beauty/Wellness: Customer buys moisturiser, uses it 30 days, disappears. A replenishment nudge tied to a points streak keeps the routine alive and the reorder predictable.
+- Fintech/Telco: User signs up, completes onboarding, never engages again. A progressive challenge tied to behaviour they already do converts an idle account into an active one.
+- Default: A customer makes one purchase and goes quiet. Not because they disliked it, but because there was no reason to return.
+
+P2 — Resource bridge: 1-2 sentences. Connect the scenario to the selected resource as useful context, not as "here is a piece of content". Reference the resource title naturally within the sentence. No Brevo. CTA written as a single natural sentence. This sentence IS the anchor text — Lemlist wraps it as a link. No variable. No placeholder. Just the sentence. Example: "Happy to send over the full guide if useful"
+
+## LinkedIn 2 — Day 13
+2-3 sentences. 40-60 words. Lead with the strongest metric from the Email 2 resource as a narrative sentence "X happened for Y, which meant Z". Connect to company_name or vertical in one sentence. Warm open question. No Brevo.
+
+## Email 4 — Breakup — Day 18
+Subject: 2 words max, no punctuation. Pick: "still open" / "last note" / "one more"
+P1: 1-2 sentences. Acknowledge no reply without guilt or pressure. Binary choice: not a priority so I will stop, or worth a short conversation.
+P2: 2 sentences. Sentence 1: metric from Email 2 reframed as opportunity cost, narrative form, "companies doing X are seeing Y". Sentence 2: soft door-open CTA written as a single natural sentence. This sentence IS the anchor text — Lemlist wraps it as a link. No variable. No placeholder. Leave the door open without pressure. Example: "If the timing ever works, here is a link to my calendar"
+
+## Output — return ONLY this JSON, nothing else:
+{
+  "selected_resource_email2_id": "",
+  "selected_resource_email2_title": "",
+  "selected_resource_email3_id": "",
+  "selected_resource_email3_title": "",
   "subject_line_1": "",
   "email_1_paragraph_1": "",
   "email_1_paragraph_2": "",
+  "email_1_lp_teaser": "",
   "email_1_paragraph_3": "",
   "linkedin_message_1": "",
   "subject_line_2": "",
+  "email_2_hook": "",
   "email_2_paragraph_1": "",
   "email_2_paragraph_2": "",
   "subject_line_3": "",
@@ -447,29 +332,126 @@ No preamble, no reasoning, no markdown fences.
   "subject_line_4": "",
   "email_4_paragraph_1": "",
   "email_4_paragraph_2": ""
-}}"""
+}
+"""
 
 
-def _build_batch_requests(contacts: list[dict], company_map: dict) -> list[dict]:
+def _build_content_prompt(contact: dict, company: dict, news_instruction: str, resources_json: str) -> str:
+    """Substitute contact + company + news + resources into the master template."""
+    from string import Template
+    return Template(_PROMPT_TEMPLATE).safe_substitute(
+        first_name           = contact.get("first_name") or "",
+        last_name            = contact.get("last_name") or "",
+        job_title            = contact.get("job_title") or "",
+        market               = contact.get("market") or company.get("market") or "",
+        company_name         = company.get("company_name") or contact.get("company_name") or "",
+        vertical             = company.get("vertical") or "",
+        esp_detected         = company.get("esp_detected") or "unknown",
+        esp_score            = company.get("esp_score") if company.get("esp_score") is not None else 0,
+        account_fit_score    = company.get("account_fit_score") if company.get("account_fit_score") is not None else 0,
+        relevance_score      = contact.get("relevance_score") if contact.get("relevance_score") is not None else 0,
+        has_loyalty_program  = bool(company.get("has_loyalty_program")),
+        needs_cdp            = bool(company.get("needs_cdp")),
+        has_wallet           = bool(company.get("has_wallet")),
+        account_narrative    = company.get("account_narrative") or "",
+        email_crm_activity   = company.get("email_crm_activity") or "",
+        news_instruction     = news_instruction,
+        resources_json       = resources_json,
+    )
+
+
+def _build_batch_requests(
+    contacts: list[dict],
+    company_map: dict,
+    news_map: dict,
+    resources_json: str,
+) -> list[dict]:
     requests = []
     for c in contacts:
-        company  = company_map.get((c["domain"], c.get("market") or ""), {})
-        resource = select_resource(company)
+        company = company_map.get((c["domain"], c.get("market") or ""), {})
+        domain = (c.get("domain") or "").strip().lower()
+        news = news_map.get(domain, {"found": False, "usable": False})
+        prompt = _build_content_prompt(c, company, _news_instruction(news), resources_json)
         requests.append({
             "custom_id": _encode_custom_id(c["id"]),
             "params": {
                 "model":      "claude-sonnet-4-6",
                 "max_tokens": 4000,
-                "system":     "You are a B2B copywriter. Output ONLY the raw JSON object requested. No reasoning, no analysis, no markdown fences, no preamble. Start your response with { and end with }.",
+                "system":     _SYSTEM,
                 "messages": [
-                    {
-                        "role":    "user",
-                        "content": _build_content_prompt(c, company, resource),
-                    },
+                    {"role": "user", "content": prompt},
                 ],
             },
         })
     return requests
+
+
+# ── CTA post-processing ───────────────────────────────────────────────────────
+
+_SENTENCE_RE = re.compile(r"[^.!?]+[.!?]+", re.DOTALL)
+
+
+def _split_cta(text: str) -> tuple[str, str]:
+    """Split a multi-sentence paragraph into (body_minus_last, last_sentence).
+
+    The last sentence is the anchor text Lemlist wraps as a link. If the
+    paragraph is a single sentence, body is empty and the whole sentence
+    becomes the CTA.
+
+    Handles the case where the final "sentence" has no terminal punctuation
+    (the model occasionally writes "Here is how they made it work" with no
+    period); we recover the trailing fragment so it becomes the CTA rather
+    than being silently swallowed into the body.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ("", "")
+    parts = _SENTENCE_RE.findall(text)
+    consumed_len = sum(len(p) for p in parts)
+    trailing = text[consumed_len:].strip()
+    if trailing:
+        parts.append(trailing)
+    if len(parts) < 2:
+        return ("", text)
+    return ("".join(parts[:-1]).strip(), parts[-1].strip())
+
+
+def _post_process(content_json: dict, personalised_lp_url: str = "") -> dict:
+    """Override the LP teaser (canonical anchor text), inject resource URLs
+    looked up by selected id, stamp the personalised LP URL minted by
+    lp_generator, and split the four CTA paragraphs into body + cta columns
+    for Lemlist consumption.
+
+    Resource URLs are looked up server-side rather than asked of the model
+    so we never serve a hallucinated link. If the model picks an unknown
+    resource id, the url field is empty and we log a warning. The
+    personalised LP URL comes from company_lp_cache (per-domain, minted
+    once) and is empty if minting failed for that domain — Lemlist would
+    then need to skip the teaser link for that contact.
+    """
+    out = dict(content_json)
+    out["email_1_lp_teaser"] = _LP_TEASER
+    out["personalised_lp_url"] = personalised_lp_url or ""
+
+    resources_by_id = {r["id"]: r for r in get_all_resources()}
+    for slot in ("email2", "email3"):
+        rid = (out.get(f"selected_resource_{slot}_id") or "").strip()
+        resource = resources_by_id.get(rid)
+        if resource:
+            out[f"selected_resource_{slot}_url"] = resource.get("url") or ""
+        else:
+            out[f"selected_resource_{slot}_url"] = ""
+            if rid:
+                logger.warning(
+                    "content: model picked unknown resource id %r for %s — url left empty",
+                    rid, slot,
+                )
+
+    for src, body_key, cta_key in _CTA_SPLITS:
+        body, cta = _split_cta(out.get(src) or "")
+        out[body_key] = body
+        out[cta_key] = cta
+    return out
 
 
 # ── Submit ────────────────────────────────────────────────────────────────────
@@ -477,15 +459,15 @@ def _build_batch_requests(contacts: list[dict], company_map: dict) -> list[dict]
 async def submit_content(limit: int | None = None) -> dict:
     """
     Reads sourced_contacts with no content_generated_at, enriches with company
-    context from priority_tam, submits to Claude Batch API in chunks of 500,
-    and records jobs in contact_content_batches.
+    context from priority_tam, fetches per-domain news, submits to Claude
+    Batch API in chunks of 500, and records jobs in contact_content_batches.
     """
     sb = get_supabase()
 
     if limit:
         contacts = (
             sb.table("sourced_contacts")
-            .select("id, domain, email, first_name, last_name, job_title, seniority, company_name, market")
+            .select("id, domain, email, first_name, last_name, job_title, seniority, company_name, market, relevance_score")
             .is_("content_generated_at", "null")
             .limit(limit)
             .execute()
@@ -494,7 +476,7 @@ async def submit_content(limit: int | None = None) -> dict:
     else:
         contacts = fetch_all(
             "sourced_contacts",
-            "id, domain, email, first_name, last_name, job_title, seniority, company_name, market",
+            "id, domain, email, first_name, last_name, job_title, seniority, company_name, market, relevance_score",
             [("is_", "content_generated_at", "null")],
         )
 
@@ -502,6 +484,7 @@ async def submit_content(limit: int | None = None) -> dict:
         logger.info("content: no contacts pending generation")
         return {"status": "ok", "submitted": 0, "batches": 0, "batch_ids": []}
 
+    # Enrich with priority_tam company context
     domains = list({c["domain"] for c in contacts})
     company_rows = fetch_all(
         "priority_tam",
@@ -512,12 +495,50 @@ async def submit_content(limit: int | None = None) -> dict:
     )
     company_map = {(r["domain"], r.get("market", "")): r for r in company_rows}
 
+    # Per-domain news + LP minting (both cached forever per domain) —
+    # only pay once per company across all batches.
+    unique_news: list[tuple[str, str]] = []
+    unique_lp: list[dict] = []
+    seen_domains: set[str] = set()
+    for c in contacts:
+        d = (c.get("domain") or "").strip().lower()
+        if not d or d in seen_domains:
+            continue
+        seen_domains.add(d)
+        company = company_map.get((c["domain"], c.get("market") or ""), {})
+        name = company.get("company_name") or c.get("company_name") or ""
+        unique_news.append((d, name))
+        unique_lp.append({
+            "domain":       d,
+            "company_name": name,
+            "industry":     company.get("vertical"),
+            "market":       c.get("market") or company.get("market"),
+            "esp":          company.get("esp_detected"),
+        })
+
+    logger.info(
+        "content: pre-fetching news + landing pages for %d unique domains",
+        len(unique_news),
+    )
+    news_map, lp_map = await asyncio.gather(
+        fetch_news_many(unique_news),
+        fetch_lp_many(unique_lp),
+    )
+    usable_count = sum(1 for n in news_map.values() if n.get("found") and n.get("usable"))
+    logger.info(
+        "content: ready — %d/%d news usable, %d/%d LPs minted",
+        usable_count, len(news_map), len(lp_map), len(unique_lp),
+    )
+
+    # Pre-serialise the resource catalogue once (same for every contact)
+    resources_json = json.dumps(get_all_resources(), indent=2, ensure_ascii=False)
+
     client = _get_client()
     chunks = [contacts[i : i + _BATCH_SIZE] for i in range(0, len(contacts), _BATCH_SIZE)]
 
     async def submit_chunk(chunk: list[dict]) -> str:
         batch = await client.messages.batches.create(
-            requests=_build_batch_requests(chunk, company_map)
+            requests=_build_batch_requests(chunk, company_map, news_map, resources_json)
         )
         mapping = {
             _encode_custom_id(c["id"]): {
@@ -542,6 +563,35 @@ async def submit_content(limit: int | None = None) -> dict:
     return {"status": "ok", "submitted": len(contacts), "batches": len(batch_ids), "batch_ids": list(batch_ids)}
 
 
+# ── Sample generation (sync, non-batch) ──────────────────────────────────────
+
+async def generate_one(contact: dict, company: dict, news: dict, lp_url: str = "") -> dict:
+    """One-off synchronous generation for sample/preview workflows. Calls
+    Claude Messages directly (not Batch) so results come back in seconds.
+    Returns the post-processed JSON (LP teaser overridden, personalised LP
+    URL stamped, resource URLs injected, CTAs split)."""
+    resources_json = json.dumps(get_all_resources(), indent=2, ensure_ascii=False)
+    prompt = _build_content_prompt(contact, company, _news_instruction(news), resources_json)
+    client = _get_client()
+    message = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=4000,
+        system=_SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw_text = (message.content[0].text or "").strip()
+    if "```" in raw_text:
+        raw_text = raw_text.split("```", 1)[1]
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:]
+        raw_text = raw_text.rsplit("```", 1)[0].strip()
+    start = raw_text.find("{")
+    end = raw_text.rfind("}") + 1
+    if start != -1 and end > start:
+        raw_text = raw_text[start:end]
+    return _post_process(json.loads(raw_text), personalised_lp_url=lp_url)
+
+
 # ── Process results ───────────────────────────────────────────────────────────
 
 async def process_content_results(batch_id: str) -> dict:
@@ -562,6 +612,20 @@ async def process_content_results(batch_id: str) -> dict:
     )
     request_mapping: dict = batch_row[0]["request_mapping"] if batch_row else {}
 
+    # Bulk-load cached LP URLs for every domain in this batch so each result
+    # can be stamped with its personalised_lp_url without one DB round-trip
+    # per row. Domains missing from cache get an empty URL.
+    domains_in_batch = list({m.get("domain") for m in request_mapping.values() if m.get("domain")})
+    lp_rows = (
+        sb.table("company_lp_cache")
+        .select("domain,preview_url")
+        .in_("domain", domains_in_batch)
+        .execute()
+        .data
+        if domains_in_batch else []
+    )
+    lp_lookup = {r["domain"]: r["preview_url"] for r in lp_rows}
+
     updates: list[dict] = []
     total_input = 0
     total_output = 0
@@ -578,13 +642,11 @@ async def process_content_results(batch_id: str) -> dict:
 
         raw_text = result.result.message.content[0].text.strip()
         try:
-            # Strip markdown fences if present anywhere in the response
             if "```" in raw_text:
                 raw_text = raw_text.split("```", 1)[1]
                 if raw_text.startswith("json"):
                     raw_text = raw_text[4:]
                 raw_text = raw_text.rsplit("```", 1)[0].strip()
-            # Extract outermost JSON object — handles leading prose
             start = raw_text.find("{")
             end   = raw_text.rfind("}") + 1
             if start != -1 and end > start:
@@ -593,6 +655,11 @@ async def process_content_results(batch_id: str) -> dict:
         except (json.JSONDecodeError, IndexError) as exc:
             logger.warning("content: failed to parse JSON for %s: %s", result.custom_id, exc)
             continue
+
+        content_json = _post_process(
+            content_json,
+            personalised_lp_url=lp_lookup.get(meta.get("domain", ""), ""),
+        )
 
         usage = result.result.message.usage
         total_input  += usage.input_tokens

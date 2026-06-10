@@ -47,3 +47,6 @@ CREATE INDEX IF NOT EXISTS contact_gaps_failed_domain_idx
 
 CREATE INDEX IF NOT EXISTS contact_gaps_failed_archived_at_idx
     ON contact_gaps_failed (archived_at);
+
+-- Standard Supabase role grants (the MCP apply_migration path doesn't auto-grant)
+GRANT ALL ON public.contact_gaps_failed TO anon, authenticated, service_role, postgres;
