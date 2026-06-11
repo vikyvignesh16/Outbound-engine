@@ -36,8 +36,10 @@ _API_URL = os.environ.get(
 # be 3-4 hours; with 15 in-flight, ~12 min wall-clock for batch 1.
 _MAX_INFLIGHT = 15
 
-# Per-call timeout — docs recommend 90s+ given LLM gen + Brevo Pages publish.
-_TIMEOUT_S = 120.0
+# Per-call timeout. Docs recommend 90s+ given LLM gen + Brevo Pages publish.
+# Bumped from 120s to 180s after observing ~5 stubborn domains (large /
+# complex companies) whose generation reliably runs past 120s and then 502s.
+_TIMEOUT_S = 180.0
 
 # Map our market codes to the API's enum.
 _MARKET_MAP: dict[str, str] = {

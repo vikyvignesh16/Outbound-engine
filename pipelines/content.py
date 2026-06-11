@@ -672,8 +672,17 @@ async def process_content_results(batch_id: str) -> dict:
             "content_generated_at": datetime.now(timezone.utc).isoformat(),
         })
 
-    for i in range(0, len(updates), 100):
-        sb.table("sourced_contacts").upsert(updates[i : i + 100], on_conflict="id").execute()
+    # Use plain UPDATE per row (not upsert): supabase-py's upsert sends
+    # INSERT ... ON CONFLICT DO UPDATE, and Postgres validates NOT NULL
+    # constraints on the INSERT path BEFORE the conflict resolution runs,
+    # so a partial payload (id + 3 content fields, no domain/email) fails
+    # the not-null on `domain` even when the row already exists.
+    for upd in updates:
+        sb.table("sourced_contacts").update({
+            "outbound_content":     upd["outbound_content"],
+            "content_batch_id":     upd["content_batch_id"],
+            "content_generated_at": upd["content_generated_at"],
+        }).eq("id", upd["id"]).execute()
 
     cost = total_input * _BATCH_INPUT_COST_PER_TOKEN + total_output * _BATCH_OUTPUT_COST_PER_TOKEN
     sb.table("contact_content_batches").update({
