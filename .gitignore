@@ -12,3 +12,4 @@ build/
 # Local data exports (CSVs, test output)
 data/
 output_sequences.csv
+dashboard/.streamlit/secrets.toml
