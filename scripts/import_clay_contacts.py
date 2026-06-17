@@ -1,8 +1,13 @@
-"""Import batch 1 Clay-sourced contacts CSV into sourced_contacts.
+"""Import a Clay-sourced contacts CSV into sourced_contacts.
+
+Reusable across batches — the CSV column mapping below works for any Clay
+export that follows the standard structure (Company Domain, Work email,
+LinkedIn Profile, etc.). Set BATCH_NUMBER at the top of this file before
+each run so contacts are tagged correctly.
 
 Usage:
-    python scripts/import_batch1_contacts.py data/batch1_clay_enriched.csv --dry-run
-    python scripts/import_batch1_contacts.py data/batch1_clay_enriched.csv
+    python scripts/import_clay_contacts.py path/to/clay_export.csv --dry-run
+    python scripts/import_clay_contacts.py path/to/clay_export.csv
 
 Per-row uniqueness in sourced_contacts is keyed by normalised `linkedin_url`
 (see migration 037). The CSV LinkedIn Profile URLs are lowercased and stripped

@@ -20,8 +20,8 @@ out of future preview/promote calls — even ones we couldn't promote get
 marked so the preview list doesn't keep showing the same dead-ends.
 
 Usage:
-    python scripts/promote_reviewed_contacts.py data/batch1_qualified_for_review.csv --dry-run
-    python scripts/promote_reviewed_contacts.py data/batch1_qualified_for_review.csv
+    python scripts/promote_reviewed_contacts.py path/to/reviewed.csv --dry-run
+    python scripts/promote_reviewed_contacts.py path/to/reviewed.csv
 """
 import argparse
 import csv
