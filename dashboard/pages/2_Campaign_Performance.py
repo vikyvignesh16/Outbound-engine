@@ -20,26 +20,37 @@ st.caption("Lemlist engagement, with bot events excluded by default.")
 # ── Campaign picker ───────────────────────────────────────────────────────────
 
 campaigns = query_df("""
+-- Filter to ABM campaigns only (matches "UKI ABM", "DACH ABM", "TR - ABM",
+-- etc. — anything with "ABM" in the campaign name, case-insensitive).
+-- GROUP BY campaign_id ONLY so each campaign appears once even if renamed
+-- mid-flight.
 SELECT campaign_id,
-       campaign_name,
-       COUNT(*) AS events,
-       MIN(received_at) AS first_event,
-       MAX(received_at) AS last_event
+       MAX(campaign_name) AS campaign_name,
+       COUNT(*)           AS events,
+       MIN(received_at)   AS first_event,
+       MAX(received_at)   AS last_event
 FROM lemlist_activities
-WHERE campaign_id IS NOT NULL AND campaign_name IS NOT NULL
-GROUP BY campaign_id, campaign_name
-HAVING COUNT(*) >= 5
+WHERE campaign_id IS NOT NULL
+  AND campaign_name IS NOT NULL
+  AND campaign_name ILIKE '%ABM%'
+GROUP BY campaign_id
 ORDER BY MAX(received_at) DESC
 """)
 
 if campaigns.empty:
-    st.info("No campaign data yet.")
+    st.info("No ABM campaign data yet. (Filter: campaign_name contains 'ABM'.)")
     st.stop()
+
+# Build label dict once (O(n)) instead of re-indexing on every render
+_labels = {
+    row["campaign_id"]: f"{row['campaign_name']}  ({int(row['events']):,} events)"
+    for _, row in campaigns.iterrows()
+}
 
 selected = st.selectbox(
     "Campaign",
     options=campaigns["campaign_id"].tolist(),
-    format_func=lambda cid: f"{campaigns.set_index('campaign_id').loc[cid, 'campaign_name']}  ({campaigns.set_index('campaign_id').loc[cid, 'events']:,} events)",
+    format_func=lambda cid: _labels.get(cid, cid),
 )
 
 camp_row = campaigns[campaigns["campaign_id"] == selected].iloc[0]
