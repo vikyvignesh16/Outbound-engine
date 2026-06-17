@@ -18,6 +18,12 @@ def _validate_secret(body: dict) -> None:
 
 
 def _parse_activity(body: dict) -> dict:
+    # Lemlist stamps `bot: true|false` on emailsClicked / emailsOpened events
+    # based on their bot heuristics (user-agent, IP, click timing). Other event
+    # types omit the field — we store None in those cases.
+    bot_val = body.get("bot")
+    is_bot = bool(bot_val) if isinstance(bot_val, bool) else None
+
     return {
         "lead_email":    body.get("leadEmail"),
         "domain":        body.get("companyDomain"),
@@ -29,6 +35,7 @@ def _parse_activity(body: dict) -> dict:
         "event_type":    body.get("type"),
         "sequence_step": body.get("sequenceStep"),
         "created_at":    body.get("createdAt"),
+        "is_bot":        is_bot,
         "raw_payload":   body,
     }
 
