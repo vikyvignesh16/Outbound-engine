@@ -35,6 +35,10 @@ async def main():
                         help="Process at most N rows (smoke testing).")
     parser.add_argument("--market", type=str, default=None,
                         help="Filter to one market (UK / DE / Ireland).")
+    parser.add_argument("--update-limit", type=int, default=None,
+                        help="Cap PATCH-path rows (those with brevo_company_id) to N.")
+    parser.add_argument("--create-limit", type=int, default=None,
+                        help="Cap POST-path rows (those without brevo_company_id) to N.")
     args = parser.parse_args()
 
     from pipelines.crm_sync import sync_priority_tam_to_crm
@@ -42,6 +46,8 @@ async def main():
         market_filter=args.market,
         limit=args.limit,
         dry_run=args.dry_run,
+        update_limit=args.update_limit,
+        create_limit=args.create_limit,
     )
 
     print()

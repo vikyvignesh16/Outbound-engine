@@ -4,10 +4,12 @@ Routing per row:
   brevo_company_id present  → PATCH /v3/companies/{id}   (update)
   brevo_company_id missing  → POST  /v3/companies        (create)
 
-One-shot tool. We deliberately do NOT write the new CRM ID back to
-priority_tam.brevo_company_id after a CREATE — re-running this pipeline
-will therefore duplicate every previously-created row. Decision locked
-with the user on 2026-06-18 (see memory/project_crm_sync.md).
+Idempotent re-runs: after each successful call we write back two columns
+to priority_tam:
+  - brevo_company_id    (the new id returned by POST, if it was a create)
+  - brevo_sync_method   ('POST' or 'PATCH')
+So the next run sees the row as already-synced and routes it to PATCH
+instead of CREATE — no duplicates in Brevo CRM.
 
 Field mapping (priority_tam → Brevo CRM):
   company_name          → name (payload root)
@@ -34,7 +36,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from db.client import fetch_all
+from db.client import fetch_all, get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -131,13 +133,31 @@ async def _post_company(client, payload):
     )
 
 
+def _writeback_after_sync(row_id, method, new_brevo_id=None):
+    """Mark a priority_tam row as synced. Failure to write back is logged
+    but does NOT roll back the successful CRM call."""
+    update = {"brevo_sync_method": method}
+    if new_brevo_id:
+        update["brevo_company_id"] = new_brevo_id
+    try:
+        get_supabase().table("priority_tam").update(update).eq("id", row_id).execute()
+    except Exception:
+        logger.exception("crm_sync: writeback failed for row %s (method=%s, new_id=%s)",
+                         row_id, method, new_brevo_id)
+
+
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
-async def sync_priority_tam_to_crm(market_filter=None, limit=None, dry_run=False):
+async def sync_priority_tam_to_crm(market_filter=None, limit=None, dry_run=False,
+                                   update_limit=None, create_limit=None):
     """One-shot push of priority_tam → Brevo CRM.
 
     Returns a status dict with updated/created/failed counts and a sample of
     failures (first 50) for the operator to inspect.
+
+    update_limit / create_limit cap the rows processed per mode after fetching —
+    useful for smoke tests (e.g. update_limit=100, create_limit=100 → 200 rows
+    total split evenly between PATCH and POST paths).
     """
     filters = [("eq", "market", market_filter)] if market_filter else None
     rows = fetch_all(
@@ -148,6 +168,15 @@ async def sync_priority_tam_to_crm(market_filter=None, limit=None, dry_run=False
         filters=filters,
         limit=limit,
     )
+
+    if update_limit is not None or create_limit is not None:
+        update_rows = [r for r in rows if (r.get("brevo_company_id") or "").strip()]
+        create_rows = [r for r in rows if not (r.get("brevo_company_id") or "").strip()]
+        if update_limit is not None:
+            update_rows = update_rows[:update_limit]
+        if create_limit is not None:
+            create_rows = create_rows[:create_limit]
+        rows = update_rows + create_rows
 
     update_n = sum(1 for r in rows if (r.get("brevo_company_id") or "").strip())
     create_n = len(rows) - update_n
@@ -183,11 +212,14 @@ async def sync_priority_tam_to_crm(market_filter=None, limit=None, dry_run=False
                         resp = await _patch_company(client, brevo_id, payload)
                         if resp.status_code == 204:
                             updated += 1
+                            _writeback_after_sync(row["id"], "PATCH")
                             return
                     else:
                         resp = await _post_company(client, payload)
                         if resp.status_code in (200, 201):
                             created += 1
+                            new_id = (resp.json() or {}).get("id")
+                            _writeback_after_sync(row["id"], "POST", new_brevo_id=new_id)
                             return
                     failed += 1
                     failures.append({
