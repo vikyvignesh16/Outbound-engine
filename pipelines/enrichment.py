@@ -341,31 +341,66 @@ async def process_results(batch_id: str) -> dict:
 
 async def run_prioritize() -> dict:
     """
-    Reads all rows from qualified_tam_v2 with account_fit_score >= 3 and
-    upserts them into priority_tam. Called after all enrichment batches complete.
+    Reads qualified_tam_v2 rows with account_fit_score >= 3 and upserts them
+    into priority_tam. Filters out rows the Domain Quality Agent has flagged
+    as subsidiaries or bogus — these should not be contacted (head office
+    gets contacted instead).
+
+    NULL domain_status is permitted so rows pending first agent check still
+    flow through. Once domain_quality_checked_at is populated for everything,
+    the NULL case becomes empty.
     """
     sb = get_supabase()
 
+    # NOTE: brevo_company_id is INTENTIONALLY EXCLUDED from the SELECT.
+    #
+    # On 2026-06-25 we discovered ~6,000 duplicate CRM records were created
+    # because this upsert was overwriting priority_tam.brevo_company_id with
+    # NULL values from qualified_tam_v2 (where CRM check hadn't seen the
+    # newly-created record yet). The next crm_sync run then saw NULL IDs and
+    # POSTed everything again, creating duplicates.
+    #
+    # Excluding brevo_company_id from the upsert payload preserves whatever
+    # value priority_tam currently has — including IDs written back by
+    # crm_sync after a CREATE. PATCHes still use these IDs correctly.
     rows = fetch_all(
         "qualified_tam_v2",
         "domain, market, company_name, company_type, employee_range, "
         "location, country, linkedin_url, vertical, "
-        "brevo_company_id, planhat_id, open_deals, deal_lost_date, "
+        "planhat_id, open_deals, deal_lost_date, "
         "esp_detected, esp_score, account_fit_score, account_narrative, "
-        "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp",
+        "email_crm_activity, has_wallet, has_loyalty_program, needs_cdp, "
+        "domain_status, domain_role",
         [("gte", "account_fit_score", 3)],
     )
 
-    if not rows:
-        logger.info("prioritize: no qualifying rows")
-        return {"status": "ok", "prioritized": 0}
+    # Domain Quality Agent gate — block subsidiaries, branches, franchisees, bogus.
+    _BLOCKED_STATUS = {"subsidiary", "bogus"}
+    _BLOCKED_ROLE   = {"property", "branch", "franchisee"}
 
-    for i in range(0, len(rows), 100):
-        chunk = rows[i : i + 100]
+    eligible = [
+        r for r in rows
+        if (r.get("domain_status") not in _BLOCKED_STATUS)
+        and (r.get("domain_role")   not in _BLOCKED_ROLE)
+    ]
+    skipped = len(rows) - len(eligible)
+    logger.info("prioritize: %d eligible after domain-quality gate (skipped %d)",
+                len(eligible), skipped)
+
+    if not eligible:
+        return {"status": "ok", "prioritized": 0, "skipped_by_gate": skipped}
+
+    # Drop the gate columns before upsert — priority_tam doesn't have them
+    for r in eligible:
+        r.pop("domain_status", None)
+        r.pop("domain_role",   None)
+
+    for i in range(0, len(eligible), 100):
+        chunk = eligible[i : i + 100]
         sb.table("priority_tam").upsert(chunk, on_conflict="domain,market,company_name").execute()
 
-    logger.info("prioritize: upserted %d rows into priority_tam", len(rows))
-    return {"status": "ok", "prioritized": len(rows)}
+    logger.info("prioritize: upserted %d rows into priority_tam", len(eligible))
+    return {"status": "ok", "prioritized": len(eligible), "skipped_by_gate": skipped}
 
 
 # ── Step 5c: poll all pending batches ────────────────────────────────────────
