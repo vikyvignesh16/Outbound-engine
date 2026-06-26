@@ -30,9 +30,12 @@ Field mapping (priority_tam → Brevo CRM):
 Any attribute whose source column is NULL/empty is dropped from the payload.
 """
 import asyncio
+import csv
+import json
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
@@ -133,6 +136,40 @@ async def _post_company(client, payload):
     )
 
 
+async def _find_existing_by_website(client, website):
+    """Self-heal lookup: returns the OLDEST Brevo CRM company id matching
+    attributes.website, or None if no record found / lookup failed.
+
+    Called before POSTing a row whose priority_tam.brevo_company_id is NULL.
+    Catches the case where the column was cleared (cron upsert bug, manual
+    edit, dropped column) but a CRM record already exists — we recover the
+    existing id and PATCH instead of duplicating.
+
+    Permissive on errors: lookup failures return None and the caller falls
+    through to a fresh POST. Better to risk a single duplicate than fail
+    the whole sync.
+    """
+    if not website:
+        return None
+    params = {"filters": json.dumps({"attributes.website": website})}
+    try:
+        resp = await client.get(
+            f"{BREVO_CRM_BASE_URL}/companies",
+            headers=_headers(), params=params, timeout=_HTTP_TIMEOUT,
+        )
+        if resp.status_code >= 400:
+            return None
+        items = resp.json().get("items") or []
+        if not items:
+            return None
+        # Oldest record wins (RevOps may have already actioned it)
+        items.sort(key=lambda i: (i.get("attributes") or {}).get("created_at") or "")
+        return items[0].get("id")
+    except Exception:
+        logger.warning("self_heal lookup failed for %s — falling through to POST", website)
+        return None
+
+
 def _writeback_after_sync(row_id, method, new_brevo_id=None):
     """Mark a priority_tam row as synced. Failure to write back is logged
     but does NOT roll back the successful CRM call."""
@@ -195,58 +232,112 @@ async def sync_priority_tam_to_crm(market_filter=None, limit=None, dry_run=False
                 "would_update": update_n, "would_create": create_n}
 
     sem = asyncio.Semaphore(_MAX_INFLIGHT)
-    updated = 0
-    created = 0
-    failed = 0
-    failures = []
+    updated     = 0
+    created     = 0
+    self_healed = 0
+    failed      = 0
+    failures    = []
+    manifest_rows = []  # one entry per processed row, written to CSV at end
 
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         async def _one(row):
-            nonlocal updated, created, failed
+            nonlocal updated, created, self_healed, failed
             async with sem:
                 payload = build_payload(row)
                 brevo_id = (row.get("brevo_company_id") or "").strip()
+                entry = {
+                    "row_id":          row["id"],
+                    "domain":          row.get("domain"),
+                    "market":          row.get("market"),
+                    "company_name":    row.get("company_name"),
+                    "before_brevo_id": brevo_id or None,
+                    "mode":            None,
+                    "after_brevo_id":  None,
+                    "http_status":     None,
+                    "error":           None,
+                }
+                resp = None
                 mode = "PATCH" if brevo_id else "POST"
                 try:
                     if brevo_id:
+                        # Existing CRM record — PATCH it
                         resp = await _patch_company(client, brevo_id, payload)
                         if resp.status_code == 204:
                             updated += 1
                             _writeback_after_sync(row["id"], "PATCH")
+                            entry.update({"mode": "PATCH", "after_brevo_id": brevo_id, "http_status": 204})
+                            manifest_rows.append(entry)
                             return
                     else:
-                        resp = await _post_company(client, payload)
-                        if resp.status_code in (200, 201):
-                            created += 1
-                            new_id = (resp.json() or {}).get("id")
-                            _writeback_after_sync(row["id"], "POST", new_brevo_id=new_id)
-                            return
+                        # SELF-HEAL: check if a CRM record exists for this website
+                        # before creating a new one. Catches the "id was wiped" case.
+                        existing_id = await _find_existing_by_website(client, row.get("domain"))
+                        if existing_id:
+                            resp = await _patch_company(client, existing_id, payload)
+                            if resp.status_code == 204:
+                                self_healed += 1
+                                _writeback_after_sync(row["id"], "PATCH", new_brevo_id=existing_id)
+                                entry.update({"mode": "SELF_HEAL", "after_brevo_id": existing_id, "http_status": 204})
+                                manifest_rows.append(entry)
+                                return
+                            mode = "SELF_HEAL"
+                        else:
+                            resp = await _post_company(client, payload)
+                            if resp.status_code in (200, 201):
+                                created += 1
+                                new_id = (resp.json() or {}).get("id")
+                                _writeback_after_sync(row["id"], "POST", new_brevo_id=new_id)
+                                entry.update({"mode": "POST", "after_brevo_id": new_id, "http_status": resp.status_code})
+                                manifest_rows.append(entry)
+                                return
+                    # Fall-through: response wasn't a success
                     failed += 1
                     failures.append({
                         "domain": row.get("domain"), "mode": mode,
-                        "status": resp.status_code, "body": resp.text[:300],
+                        "status": resp.status_code if resp else None,
+                        "body":   resp.text[:300]  if resp else "no response",
                     })
+                    entry.update({"mode": f"FAILED_{mode}", "http_status": resp.status_code if resp else None,
+                                  "error": resp.text[:300] if resp else "no response"})
+                    manifest_rows.append(entry)
                 except Exception as exc:
                     failed += 1
                     failures.append({
                         "domain": row.get("domain"), "mode": mode,
                         "status": "exception", "body": str(exc)[:300],
                     })
+                    entry.update({"mode": f"EXCEPTION_{mode}", "error": str(exc)[:300]})
+                    manifest_rows.append(entry)
 
-                done = updated + created + failed
+                done = updated + created + self_healed + failed
                 if done % 100 == 0:
-                    logger.info("crm_sync progress: %d/%d (updated=%d created=%d failed=%d)",
-                                done, len(rows), updated, created, failed)
+                    logger.info("crm_sync progress: %d/%d (updated=%d created=%d self_healed=%d failed=%d)",
+                                done, len(rows), updated, created, self_healed, failed)
 
         await asyncio.gather(*[_one(r) for r in rows])
 
-    logger.info("crm_sync done: updated=%d created=%d failed=%d",
-                updated, created, failed)
+    # Write run manifest CSV (audit trail — one row per processed input row)
+    manifest_dir = Path("data/crm_sync_manifests")
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    manifest_path = manifest_dir / f"{timestamp_str}_crm_sync.csv"
+    if manifest_rows:
+        cols = list(manifest_rows[0].keys())
+        with manifest_path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=cols)
+            writer.writeheader()
+            writer.writerows(manifest_rows)
+        logger.info("crm_sync: manifest written → %s (%d rows)", manifest_path, len(manifest_rows))
+
+    logger.info("crm_sync done: updated=%d created=%d self_healed=%d failed=%d",
+                updated, created, self_healed, failed)
     return {
-        "status":   "ok",
-        "total":    len(rows),
-        "updated":  updated,
-        "created":  created,
-        "failed":   failed,
-        "failures": failures[:50],
+        "status":      "ok",
+        "total":       len(rows),
+        "updated":     updated,
+        "created":     created,
+        "self_healed": self_healed,
+        "failed":      failed,
+        "failures":    failures[:50],
+        "manifest":    str(manifest_path) if manifest_rows else None,
     }
