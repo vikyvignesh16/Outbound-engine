@@ -40,19 +40,34 @@ _TITLE_FILTER = (
 
 
 def _build_sales_nav_url(company_org_id: str, company_name: str, market: str) -> str:
+    """Build a Sales Navigator people-search URL filtered by company + region + title.
+
+    company_org_id may be a single id ('12345') or a comma-separated list
+    ('2120191,385928,17250') — PB Company Extractor returns multiple ids for
+    chain brands and multi-entity LinkedIn pages (e.g. Sainsbury's, Selfridges,
+    Daniel Thwaites, ITV). Embedding a comma-list as one urn breaks the URL
+    parser; LinkedIn expects each id as a separate value entry inside the
+    CURRENT_COMPANY filter's List().
+    """
     region_id, region_text = _REGION.get(market, ("101165590", "United Kingdom"))
     region_filter = (
         f"(type:REGION,values:List("
         f"(id:{region_id},text:{region_text},selectionType:INCLUDED)"
         f"))"
     )
-    company_filter = (
-        f"(type:CURRENT_COMPANY,values:List("
-        f"(id:urn:li:organization:{company_org_id},"
+
+    org_ids = [oid.strip() for oid in str(company_org_id or "").split(",") if oid.strip()]
+    if not org_ids:
+        raise ValueError(f"empty company_org_id for {company_name!r}")
+
+    company_values = ",".join(
+        f"(id:urn:li:organization:{oid},"
         f"text:{company_name},"
         f"selectionType:INCLUDED,parent:(id:0))"
-        f"))"
+        for oid in org_ids
     )
+    company_filter = f"(type:CURRENT_COMPANY,values:List({company_values}))"
+
     query = f"(filters:List({_TITLE_FILTER},{region_filter},{company_filter}))"
     return f"https://www.linkedin.com/sales/search/people?query={quote(query)}"
 
