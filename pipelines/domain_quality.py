@@ -339,20 +339,42 @@ async def _process_one_row(client: anthropic.AsyncAnthropic, row: dict, sem: asy
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
-async def run_domain_quality_check(limit: int | None = None, parked_only: bool = False) -> dict:
-    """Process all qualified_tam_v2 rows where domain_quality_checked_at IS NULL.
+async def run_domain_quality_check(
+    limit: int | None = None,
+    parked_only: bool = False,
+    target_ids: list[str] | None = None,
+) -> dict:
+    """Process qualified_tam_v2 rows where domain_quality_checked_at IS NULL.
 
     parked_only=True restricts processing to the rows whose
     (domain, market, company_name) tuple appears in priority_tam_parked
     (i.e. the 1,956 rows we moved aside on 2026-06-24 because they shared a
     domain with another row). Useful for the one-off triage backfill.
+
+    target_ids restricts processing to a specific list of qualified_tam_v2.id
+    values — used for ad-hoc batches (e.g. cleaning up the top-N candidates
+    for a gifting campaign before pushing to Clay).
     """
-    rows = fetch_all(
-        "qualified_tam_v2",
-        "id, domain, market, company_name",
-        [("is_", "domain_quality_checked_at", "null")],
-        limit=(None if parked_only else limit),
-    )
+    if target_ids:
+        # Targeted run — load ONLY the requested rows, then keep the unchecked ones.
+        all_target = []
+        chunk = 50
+        sb = get_supabase()
+        for i in range(0, len(target_ids), chunk):
+            res = sb.table("qualified_tam_v2").select(
+                "id, domain, market, company_name, domain_quality_checked_at"
+            ).in_("id", target_ids[i:i + chunk]).execute().data or []
+            all_target.extend(res)
+        rows = [r for r in all_target if r.get("domain_quality_checked_at") is None]
+        logger.info("domain_quality: target_ids filter → %d of %d rows still unchecked",
+                    len(rows), len(target_ids))
+    else:
+        rows = fetch_all(
+            "qualified_tam_v2",
+            "id, domain, market, company_name",
+            [("is_", "domain_quality_checked_at", "null")],
+            limit=(None if parked_only else limit),
+        )
 
     if parked_only:
         parked = fetch_all("priority_tam_parked", "domain, market, company_name")
