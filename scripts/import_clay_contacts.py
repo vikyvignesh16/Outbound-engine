@@ -25,21 +25,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.client import get_supabase  # noqa: E402
 
-BATCH_NUMBER = 1
+BATCH_NUMBER = 2
 
 # Clay CSV → sourced_contacts column mapping.
+# Batch 2's Clay table renames a couple of columns vs batch 1:
+#   "Work email"       → "Preferred Email"
+#   "Relevance Score"  → "Job Title Relevance Score relevance Score"
+#   "Reasoning"        → "Job Title Relevance Score reasoning"
+# Email Provider column is no longer exported.
 COLUMN_MAP = {
     "domain":              "Company Domain",
     "company_name":        "Company Name",
-    "email":               "Work email",
-    "email_provider":      "Email Provider",
+    "email":               "Preferred Email",
     "first_name":          "First Name",
     "last_name":           "Last Name",
     "job_title":           "Job Title",
     "linkedin_url":        "LinkedIn Profile",
     "market":              "Market",
-    "relevance_score":     "Relevance Score",
-    "relevance_reasoning": "Reasoning",
+    "relevance_score":     "Job Title Relevance Score relevance Score",
+    "relevance_reasoning": "Job Title Relevance Score reasoning",
 }
 
 
