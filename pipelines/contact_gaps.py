@@ -131,18 +131,28 @@ def detect_gaps(batch_number: int) -> int:
         for r in fetch_all("contact_gaps", "domain",
                            filters=[("eq", "batch_number", batch_number)])
     }
-    gaps = [
-        r for r in batch_rows
-        if r["domain"] not in contacted
-        and r["domain"] not in pb_seen
-        and r["domain"] not in already_tracked
-    ]
+    # Dedupe by domain — campaign_batches can legitimately have multiple rows
+    # sharing a domain (e.g. Jurys Hotel Group + Leonardo Hotels both on
+    # leonardohotels.co.uk after an acquisition). contact_gaps has a unique
+    # constraint on (domain, batch_number), so we keep only the first
+    # occurrence per domain; the sibling company gets whatever contacts PB
+    # scrapes for the shared LinkedIn org.
+    gaps: list[dict] = []
+    seen_domains: set[str] = set()
+    for r in batch_rows:
+        d = r["domain"]
+        if (d in contacted or d in pb_seen or d in already_tracked
+                or d in seen_domains):
+            continue
+        seen_domains.add(d)
+        gaps.append(r)
+
     if not gaps:
         return 0
 
     sb = get_supabase()
-    # Insert (not upsert) — `already_tracked` guards us against conflicts so the
-    # phantombuster_status of existing rows is never overwritten.
+    # Insert (not upsert) — `already_tracked` + local dedupe guard us against
+    # conflicts so the phantombuster_status of existing rows is never overwritten.
     for i in range(0, len(gaps), 100):
         chunk = [{
             "domain":               g["domain"],
