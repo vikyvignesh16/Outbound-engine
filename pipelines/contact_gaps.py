@@ -285,9 +285,13 @@ def poll_phase1() -> int:
 
             results = get_result_rows(container)
             if not results:
+                # PB Company Extractor returned no results — almost always means
+                # the LinkedIn URL is dead / unclaimed / points to a company that
+                # was renamed or merged. The AI URL recovery pipeline picks up
+                # 'linkedin_url_dead' rows and tries to find the correct URL.
                 sb.table("contact_gaps").update({
                     "phantombuster_status": "failed",
-                    "gap_reason": "no_company_id_returned",
+                    "gap_reason": "linkedin_url_dead",
                 }).eq("id", row["id"]).execute()
                 continue
 
