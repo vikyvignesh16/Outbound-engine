@@ -122,6 +122,19 @@ async def find_linkedin_url(
     return _extract_url(combined)
 
 
+def _normalise_linkedin(url: str | None) -> str:
+    if not url:
+        return ""
+    u = url.strip().lower().rstrip("/")
+    for prefix in ("https://", "http://"):
+        if u.startswith(prefix):
+            u = u[len(prefix):]
+            break
+    if u.startswith("www."):
+        u = u[4:]
+    return u
+
+
 async def _process_one(
     client: anthropic.AsyncAnthropic,
     row: dict,
@@ -132,6 +145,19 @@ async def _process_one(
             client, row["company_name"], row["market"] or "", row["domain"]
         )
         sb = get_supabase()
+
+        # What URL does sourced_tam_v2 currently have? If Claude returns the
+        # SAME URL that already failed PB, retrying will just fail again —
+        # archive instead of looping.
+        current = sb.table("sourced_tam_v2").select("linkedin_url").eq(
+            "domain", row["domain"]
+        ).order("updated_at", desc=True).limit(1).execute().data
+        current_url = (current[0]["linkedin_url"] if current else "") or ""
+
+        if new_url and _normalise_linkedin(new_url) == _normalise_linkedin(current_url):
+            logger.info("linkedin_url_recovery: %s — Claude returned same URL that already failed, archiving",
+                        row["domain"])
+            new_url = None  # fall through to archive branch
 
         if new_url:
             # Update every sourced_tam_v2 row for this domain (Clay may have
