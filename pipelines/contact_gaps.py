@@ -635,9 +635,22 @@ async def poll_contact_gaps():
 
 
 def run_phase1_for_latest_batch() -> int:
-    """Cron-friendly run_phase1: resolves the latest batch_number itself."""
-    batches = fetch_all("campaign_batches", "batch_number",
-                        order_by=[("batch_number", True)], limit=1)
-    if not batches:
+    """Cron-friendly Phase 1 launcher.
+
+    Historically this always targeted the latest batch, but that starved
+    off-cycle batches (e.g. the 2026-06-26 UK gifting batch #2 sat with 50
+    pending rows while the monthly batch #3 got all the launches). Now
+    prefers the OLDEST batch that still has pending rows, so smaller
+    off-cycle batches finish quickly before the big monthly one takes over.
+
+    Returns count launched (0 or 1) — run_phase1 has a global single-slot
+    guard so at most one launch per invocation, regardless of batch."""
+    pending = fetch_all(
+        "contact_gaps", "batch_number",
+        filters=[("eq", "phantombuster_status", "pending")],
+        order_by=[("batch_number", False)],  # ASC — oldest batch first
+        limit=1,
+    )
+    if not pending:
         return 0
-    return run_phase1(batches[0]["batch_number"])
+    return run_phase1(pending[0]["batch_number"])
