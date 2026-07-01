@@ -159,6 +159,27 @@ def _find_result_json_url(output: str) -> str | None:
     return json_url
 
 
+def output_shows_scrape_success(container: dict) -> bool:
+    """True when PB's stdout log emitted a 'company(s) was/were scraped' event.
+
+    Discovered 2026-07-01: PB flips container.status to 'finished' a moment
+    BEFORE it finalises the container.resultObject field, so a poll that lands
+    in the race window sees status=finished + resultObject=empty. The output
+    log's structured events (slug='success', text='N companies were scraped')
+    are written earlier, so we use them as a reliable "the scrape completed
+    successfully — resultObject is coming" signal. Callers can then leave the
+    row in extracting_company and re-parse on the next poll cycle instead of
+    burning a fresh PB launch on a phantom failure.
+    """
+    cid = container.get("id") or container.get("containerId")
+    if not cid:
+        return False
+    output = _fetch_container_output(str(cid))
+    if not output:
+        return False
+    return "company was scraped" in output or "companies were scraped" in output
+
+
 def session_expired(container: dict) -> bool:
     """Heuristic check: did this container fail because the LinkedIn session cookie expired?
     Reads the container output log and looks for known PB error markers."""

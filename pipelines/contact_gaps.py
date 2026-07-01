@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks
 from db.client import get_supabase, fetch_all
 from utils.phantombuster import (
     launch_agent, get_container, is_finished, is_error, get_result_rows,
+    output_shows_scrape_success,
 )
 from utils.slack import notify
 
@@ -285,10 +286,18 @@ def poll_phase1() -> int:
 
             results = get_result_rows(container)
             if not results:
-                # PB returned no results. Could be a genuinely dead URL, OR
-                # PB flaking (session/rate-limit/anti-bot — happens more than
-                # we'd like). Retry up to 3 times with the SAME URL before we
-                # tag it linkedin_url_dead and hand off to Claude recovery.
+                # Two reasons resultObject can be empty when status=finished:
+                #   (a) PB race — container flipped to 'finished' before it
+                #       finished writing resultObject. Output log's success
+                #       event (e.g. "1 company was scraped") is written earlier
+                #       so we can detect this race and just wait one more poll.
+                #   (b) Genuine PB failure — no scrape happened. Retry with a
+                #       fresh container up to 3 times.
+                if output_shows_scrape_success(container):
+                    logger.info("contact_gaps: %s PB output shows success but resultObject empty — "
+                                "waiting for populate (staying in extracting_company)",
+                                row["domain"])
+                    continue
                 current = fetch_all(
                     "contact_gaps", "pb_failure_count",
                     filters=[("eq", "id", row["id"])], limit=1,
