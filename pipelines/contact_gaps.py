@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -637,20 +638,8 @@ async def contact_gaps_digest(background_tasks: BackgroundTasks):
     return {"status": "started"}
 
 
-@router.post("/pipelines/contact-gaps/poll")
-async def poll_contact_gaps():
-    """Advance all in-flight PhantomBuster jobs AND launch the next pending one.
-    Run every 1 min via Railway cron (was 5 min; dropped 2026-07-01 because
-    ~9/10 min per row was dead poll-wait time — PB containers finish in ~30-60s
-    but we weren't checking until the next poll cycle). At 1-min cadence a
-    single row drains in ~2 min end-to-end instead of ~10 min.
-
-    Sequencing inside a single call:
-      1. poll_phase1 — drain any finished Phase 1 containers to building_url
-      2. run_phase2  — if no in-flight, launch ONE Sales Nav search
-      3. poll_phase2 — drain any finished Phase 2 containers (write contacts)
-      4. run_phase1  — if no in-flight + under daily cap, launch ONE Phase 1
-    """
+def _do_poll_cycle() -> dict:
+    """One iteration of the poll sequence. Extracted so the endpoint can loop it."""
     p1_done       = poll_phase1()
     p2_launched   = run_phase2()
     p2_done       = poll_phase2()
@@ -664,6 +653,50 @@ async def poll_contact_gaps():
         "phase2_launched":   p2_launched,
         "phase2_completed":  p2_done,
         "phase1_launched":   p1_launched,
+    }
+
+
+# Burst-poll config: Railway's cron minimum is 5 min, but PB containers finish
+# in ~30-60 seconds — so 5-min polling means ~9/10 min per row is dead wait.
+# Fix: on each Railway cron fire, run BURST_ITERATIONS poll cycles internally
+# with BURST_INTERVAL_S seconds between them. 5 iters × 60s = ~4 min of active
+# polling per Railway fire, effectively 1-min cadence.
+BURST_ITERATIONS  = 5
+BURST_INTERVAL_S  = 60
+
+
+async def _burst_poll() -> None:
+    """Run _do_poll_cycle() BURST_ITERATIONS times, sleeping BURST_INTERVAL_S
+    between each. Runs in a FastAPI BackgroundTask so the HTTP request returns
+    fast; the loop keeps running in the same worker process for the ~4 min
+    burst window. If the worker restarts mid-burst, the next Railway cron fire
+    picks up where it left off (nothing is persisted mid-loop)."""
+    for i in range(BURST_ITERATIONS):
+        try:
+            _do_poll_cycle()
+        except Exception:
+            logger.exception("contact_gaps/burst-poll iter %d error", i)
+        if i < BURST_ITERATIONS - 1:
+            await asyncio.sleep(BURST_INTERVAL_S)
+
+
+@router.post("/pipelines/contact-gaps/poll")
+async def poll_contact_gaps(background_tasks: BackgroundTasks):
+    """Advance all in-flight PhantomBuster jobs AND launch the next pending
+    ones. Triggered every 5 min by Railway cron; internally runs 5 poll cycles
+    with 60s gaps to achieve effective 1-min polling cadence.
+
+    Sequencing inside a single cycle (see _do_poll_cycle):
+      1. poll_phase1 — drain any finished Phase 1 containers to building_url
+      2. run_phase2  — if no in-flight, launch ONE Sales Nav search
+      3. poll_phase2 — drain any finished Phase 2 containers (write contacts)
+      4. run_phase1  — if no in-flight + under daily cap, launch ONE Phase 1
+    """
+    background_tasks.add_task(_burst_poll)
+    return {
+        "status":     "burst-started",
+        "iterations": BURST_ITERATIONS,
+        "interval_s": BURST_INTERVAL_S,
     }
 
 
