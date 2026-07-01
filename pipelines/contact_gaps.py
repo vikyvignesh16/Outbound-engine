@@ -640,7 +640,10 @@ async def contact_gaps_digest(background_tasks: BackgroundTasks):
 @router.post("/pipelines/contact-gaps/poll")
 async def poll_contact_gaps():
     """Advance all in-flight PhantomBuster jobs AND launch the next pending one.
-    Run every 30 min via Railway cron.
+    Run every 1 min via Railway cron (was 5 min; dropped 2026-07-01 because
+    ~9/10 min per row was dead poll-wait time — PB containers finish in ~30-60s
+    but we weren't checking until the next poll cycle). At 1-min cadence a
+    single row drains in ~2 min end-to-end instead of ~10 min.
 
     Sequencing inside a single call:
       1. poll_phase1 — drain any finished Phase 1 containers to building_url

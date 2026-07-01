@@ -380,7 +380,7 @@ flowchart LR
 | **Contact gaps digest** | `0 7 * * *` (daily) | `/pipelines/contact-gaps/digest` | Operational (Slack) |
 | **Monthly Batch** | Day 1 @ 09:00 UTC | `/pipelines/run-monthly` | Phase 4a |
 | **Trigger contact gaps** | Day 2 @ 00:00 UTC | `/pipelines/contact-gaps/run-latest` | Phase 4a |
-| **Contact gaps poll** | every 5 min (10× burst) | `/pipelines/contact-gaps/poll` | Phase 4a |
+| **Contact gaps poll** | every 1 min | `/pipelines/contact-gaps/poll` | Phase 4a |
 
 ---
 
