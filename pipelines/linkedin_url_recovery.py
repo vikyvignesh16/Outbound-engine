@@ -154,16 +154,17 @@ async def _process_one(
         ).order("updated_at", desc=True).limit(1).execute().data
         current_url = (current[0]["linkedin_url"] if current else "") or ""
 
-        if new_url and _normalise_linkedin(new_url) == _normalise_linkedin(current_url):
-            logger.info("linkedin_url_recovery: %s — Claude returned same URL that already failed, archiving",
+        same_url = bool(new_url and _normalise_linkedin(new_url) == _normalise_linkedin(current_url))
+        if same_url:
+            logger.info("linkedin_url_recovery: %s — Claude returned same URL PB already retried 3x, archiving",
                         row["domain"])
-            new_url = None  # fall through to archive branch
 
-        if new_url:
-            # Update every sourced_tam_v2 row for this domain (Clay may have
-            # multiple with different LinkedIn URLs — the ONE we search on for
-            # PB Phase 1 is picked by ORDER BY updated_at DESC, so touching
-            # them all guarantees the next launch uses the recovered URL).
+        if new_url and not same_url:
+            # Genuine URL correction — update sourced_tam_v2 and reset the row
+            # for a fresh PB retry budget with the corrected URL. Touch every
+            # sourced_tam_v2 row for this domain (Clay may have multiple with
+            # different LinkedIn URLs — Phase 1 picks by ORDER BY updated_at DESC,
+            # so touching them all guarantees the next launch uses the new URL).
             try:
                 sb.table("sourced_tam_v2").update({
                     "linkedin_url": new_url
@@ -172,6 +173,7 @@ async def _process_one(
                     "phantombuster_status": "pending",
                     "gap_reason":           "no_contacts",   # reset to normal
                     "phantom_id":           None,
+                    "pb_failure_count":     0,               # fresh retry budget
                 }).eq("id", row["id"]).execute()
                 logger.info("linkedin_url_recovery: recovered %s → %s",
                             row["domain"], new_url)
@@ -180,15 +182,19 @@ async def _process_one(
                 logger.exception("linkedin_url_recovery: DB update failed for %s", row["domain"])
                 return {"domain": row["domain"], "outcome": "db_error"}
 
-        # No URL found — archive to contact_gaps_failed and remove from active queue
+        # No new URL found (NOT_FOUND) OR same-URL after 3 PB retries.
+        # Archive with a reason that reflects what we actually know:
+        #   NOT_FOUND      → linkedin_url_not_recoverable (no LinkedIn presence)
+        #   same-URL       → pb_persistent_failure (URL might be fine, PB won't scrape)
+        archive_reason = "pb_persistent_failure" if same_url else "linkedin_url_not_recoverable"
         try:
             full_row = sb.table("contact_gaps").select("*").eq("id", row["id"]).execute().data
             if full_row:
-                archive_row = {**full_row[0], "gap_reason": "linkedin_url_not_recoverable"}
+                archive_row = {**full_row[0], "gap_reason": archive_reason}
                 sb.table("contact_gaps_failed").insert(archive_row).execute()
                 sb.table("contact_gaps").delete().eq("id", row["id"]).execute()
-            logger.info("linkedin_url_recovery: not recoverable %s (archived)", row["domain"])
-            return {"domain": row["domain"], "outcome": "archived"}
+            logger.info("linkedin_url_recovery: %s archived (%s)", row["domain"], archive_reason)
+            return {"domain": row["domain"], "outcome": "archived", "reason": archive_reason}
         except Exception:
             logger.exception("linkedin_url_recovery: archive failed for %s", row["domain"])
             return {"domain": row["domain"], "outcome": "archive_error"}

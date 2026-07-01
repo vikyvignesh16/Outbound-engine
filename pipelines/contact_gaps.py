@@ -285,14 +285,31 @@ def poll_phase1() -> int:
 
             results = get_result_rows(container)
             if not results:
-                # PB Company Extractor returned no results — almost always means
-                # the LinkedIn URL is dead / unclaimed / points to a company that
-                # was renamed or merged. The AI URL recovery pipeline picks up
-                # 'linkedin_url_dead' rows and tries to find the correct URL.
-                sb.table("contact_gaps").update({
-                    "phantombuster_status": "failed",
-                    "gap_reason": "linkedin_url_dead",
-                }).eq("id", row["id"]).execute()
+                # PB returned no results. Could be a genuinely dead URL, OR
+                # PB flaking (session/rate-limit/anti-bot — happens more than
+                # we'd like). Retry up to 3 times with the SAME URL before we
+                # tag it linkedin_url_dead and hand off to Claude recovery.
+                current = fetch_all(
+                    "contact_gaps", "pb_failure_count",
+                    filters=[("eq", "id", row["id"])], limit=1,
+                )
+                new_count = ((current[0]["pb_failure_count"] if current else 0) or 0) + 1
+                if new_count < 3:
+                    sb.table("contact_gaps").update({
+                        "phantombuster_status": "pending",
+                        "pb_failure_count":     new_count,
+                        "phantom_id":           None,
+                    }).eq("id", row["id"]).execute()
+                    logger.info("contact_gaps: %s PB empty-result #%d — retrying",
+                                row["domain"], new_count)
+                else:
+                    sb.table("contact_gaps").update({
+                        "phantombuster_status": "failed",
+                        "gap_reason":           "linkedin_url_dead",
+                        "pb_failure_count":     new_count,
+                    }).eq("id", row["id"]).execute()
+                    logger.info("contact_gaps: %s PB failed 3x — tagged linkedin_url_dead",
+                                row["domain"])
                 continue
 
             company_data = results[0]
