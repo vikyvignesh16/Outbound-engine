@@ -201,14 +201,25 @@ async def _process_one(
 
 
 async def run_linkedin_url_recovery(limit: int | None = None) -> dict:
-    """Process contact_gaps rows where phantombuster_status='failed' and
-    gap_reason='linkedin_url_dead'. Returns per-outcome counts + samples."""
+    """Process contact_gaps rows that need a working LinkedIn URL discovered.
+
+    Two failure modes qualify for recovery:
+      • gap_reason='linkedin_url_dead'  — PB Company Extractor confirmed the
+        URL we already had is dead/unclaimed after 3 retries. Claude may find
+        a corrected URL for the same company.
+      • gap_reason='no_linkedin_url'    — Clay never populated a LinkedIn URL
+        on sourced_tam_v2 in the first place, so PB Phase 1 was never even
+        launched. Claude finds the URL from scratch and populates it, then
+        the row is reset to 'pending' so poll_phase1 picks it up.
+
+    Returns per-outcome counts + samples.
+    """
     rows = fetch_all(
         "contact_gaps",
         "id, domain, company_name, market, batch_number, phantom_id",
         filters=[
             ("eq", "phantombuster_status", "failed"),
-            ("eq", "gap_reason", "linkedin_url_dead"),
+            ("in_", "gap_reason", ["linkedin_url_dead", "no_linkedin_url"]),
         ],
         limit=limit,
     )
