@@ -126,14 +126,18 @@ def get_result_rows(container: dict) -> list[dict]:
     json_url = _find_result_json_url(output)
     if not json_url:
         return []
+    # PB S3 URLs can contain spaces from csvName ("Commercenext improved Audience.json").
+    # HTTP-encode them so httpx accepts the URL and S3 can locate the object.
+    from urllib.parse import quote
+    safe_url = quote(json_url, safe=":/?#[]@!$&'()*+,;=%")
     try:
         with httpx.Client() as client:
-            resp = client.get(json_url, timeout=30, follow_redirects=True)
+            resp = client.get(safe_url, timeout=30, follow_redirects=True)
             resp.raise_for_status()
             data = resp.json()
             return data if isinstance(data, list) else []
     except Exception as exc:
-        logger.warning("phantombuster: failed to fetch %s — %s", json_url, exc)
+        logger.warning("phantombuster: failed to fetch %s — %s", safe_url, exc)
         return []
 
 
@@ -141,11 +145,14 @@ def _find_result_json_url(output: str) -> str | None:
     """Parse PB stdout to find the JSON result S3 URL.
 
     Different PB agents save under different filenames:
-      • Company Extractor          → result.json
-      • Sales Nav Search Export    → {csvName}.json
+      • Company Extractor          → {csvName}.json (with SPACES in csvName)
+      • Sales Nav Search Export    → {csvName}.json (with SPACES in csvName)
 
     The marker we anchor on is the literal `JSON saved at <url>` line that all
-    PB save-output scripts emit.  We take the last such URL ending in `.json`."""
+    PB save-output scripts emit. We take the last such URL, extending it up to
+    and including the .json extension — PB S3 URLs regularly contain spaces
+    (from csvName templates like "Commercenext improved Audience.json"),
+    so we CAN'T truncate on whitespace."""
     json_url = None
     for line in output.splitlines():
         if "JSON saved at" not in line:
@@ -153,23 +160,27 @@ def _find_result_json_url(output: str) -> str | None:
         idx = line.find("https://")
         if idx < 0:
             continue
-        url = line[idx:].split()[0].strip()
-        if url.endswith(".json"):
-            json_url = url
+        rest = line[idx:].rstrip()  # keep interior spaces, drop trailing \r
+        end = rest.rfind(".json")
+        if end < 0:
+            continue
+        json_url = rest[:end + len(".json")]
     return json_url
 
 
 def output_shows_scrape_success(container: dict) -> bool:
-    """True when PB's stdout log emitted a 'company(s) was/were scraped' event.
+    """True when PB's stdout log shows the Company Extractor scrape completed.
 
-    Discovered 2026-07-01: PB flips container.status to 'finished' a moment
-    BEFORE it finalises the container.resultObject field, so a poll that lands
-    in the race window sees status=finished + resultObject=empty. The output
-    log's structured events (slug='success', text='N companies were scraped')
-    are written earlier, so we use them as a reliable "the scrape completed
-    successfully — resultObject is coming" signal. Callers can then leave the
-    row in extracting_company and re-parse on the next poll cycle instead of
-    burning a fresh PB launch on a phantom failure.
+    Actual markers observed in raw PB output (from the diagnose endpoint on
+    2026-07-02 with Brevo's LinkedIn URL):
+      [done_]✅ Scraped data for company Brevo.
+      [done_]✅ JSON saved at https://phantombuster.s3.amazonaws.com/.../....json
+      [done_]✅ Data successfully saved!
+      * Process finished successfully (exit code: 0)
+
+    Any of these confirm the scrape ran to completion. Callers can then leave
+    a row in extracting_company to re-poll (in case resultObject / S3 fetch
+    is still catching up) rather than burning a fresh PB launch.
     """
     cid = container.get("id") or container.get("containerId")
     if not cid:
@@ -177,7 +188,13 @@ def output_shows_scrape_success(container: dict) -> bool:
     output = _fetch_container_output(str(cid))
     if not output:
         return False
-    return "company was scraped" in output or "companies were scraped" in output
+    return (
+        "Scraped data for company" in output or
+        "JSON saved at" in output or
+        "Data successfully saved" in output or
+        "company was scraped" in output or       # keep old markers as safety net
+        "companies were scraped" in output
+    )
 
 
 def session_expired(container: dict) -> bool:
