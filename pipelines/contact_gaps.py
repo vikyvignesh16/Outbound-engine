@@ -286,6 +286,19 @@ def poll_phase1() -> int:
                 continue
 
             results = get_result_rows(container)
+            # PB Company Extractor returns a single "unavailable company" marker row
+            # for LinkedIn URLs that don't resolve to a real company:
+            #   [{"error": "Unavailable company", "query": "...", "timestamp": "..."}]
+            # It's technically non-empty, so the empty-result branch below misses it —
+            # and the org_id lookup then fails with 'org_id_field_unknown'. Strip out
+            # these marker rows so they flow through the same retry/linkedin_url_dead
+            # logic as a truly empty result.
+            results = [
+                r for r in results
+                if not (isinstance(r, dict) and "error" in r and not any(
+                    r.get(k) for k in ("linkedinID","mainCompanyID","linkedinId","companyId","id","linkedInId")
+                ))
+            ]
             if not results:
                 # Two reasons resultObject can be empty when status=finished:
                 #   (a) PB race — container flipped to 'finished' before it
