@@ -85,6 +85,17 @@ def map_row(csv_row: dict) -> dict | None:
     if not mapped.get("linkedin_url") or not mapped.get("domain"):
         return None
 
+    # Persist location + country + the raw CSV row in the jsonb `raw` column.
+    # Downstream enrichment (e.g. scripts/enrich_gifting_addresses.py) reads
+    # raw.location as the LinkedIn city hint — same key PB Sales Nav uses on
+    # its own contacts. Backfill 2026-07-02 added this after 172 batch #2
+    # contacts landed with raw=NULL because Location wasn't mapped here.
+    mapped["raw"] = {
+        "location":      (csv_row.get("Location") or "").strip(),
+        "country":       (csv_row.get("Country")  or "").strip(),
+        "clay_full_row": csv_row,
+    }
+
     mapped["linkedin_url"]    = normalise_linkedin_url(mapped["linkedin_url"])
     mapped["relevance_score"] = _coerce_int(mapped.get("relevance_score"))
     return mapped
