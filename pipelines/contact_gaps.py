@@ -720,3 +720,85 @@ def run_phase1_for_latest_batch() -> int:
     if not pending:
         return 0
     return run_phase1(pending[0]["batch_number"])
+
+
+# ── Diagnostic: end-to-end trace of a single URL through Phase 1 ───────────────
+
+@router.post("/pipelines/diagnose/pb-extract")
+async def diagnose_pb_extract(linkedin_url: str, max_poll_seconds: int = 180):
+    """Manually run one LinkedIn URL through PB Company Extractor and dump the
+    full trace — container status, resultObject (raw + parsed), raw output log,
+    and what our parser sees. Cuts through the pipeline noise to confirm exactly
+    where extraction is/isn't working.
+
+    Call e.g. POST /pipelines/diagnose/pb-extract?linkedin_url=https://www.linkedin.com/company/brevo/
+    """
+    import json as _json
+    from utils.phantombuster import _fetch_container_output
+
+    agent_id = os.environ["PHANTOMBUSTER_COMPANY_EXTRACTOR_ID"]
+
+    try:
+        container_id = launch_agent(agent_id, {"spreadsheetUrl": linkedin_url})
+    except Exception as exc:
+        return {"stage": "launch_failed", "error": str(exc)}
+
+    # Poll until finished or timeout
+    elapsed = 0
+    container = None
+    while elapsed < max_poll_seconds:
+        try:
+            container = get_container(container_id)
+        except Exception as exc:
+            return {"stage": "get_container_failed", "container_id": container_id, "error": str(exc)}
+        if is_finished(container):
+            break
+        await asyncio.sleep(5)
+        elapsed += 5
+
+    if not container or not is_finished(container):
+        return {
+            "stage": "still_running",
+            "container_id": container_id,
+            "container_status": container.get("status") if container else None,
+            "waited_s": elapsed,
+        }
+
+    # Container is finished — dump everything
+    raw_output = ""
+    try:
+        raw_output = _fetch_container_output(container_id)
+    except Exception as exc:
+        raw_output = f"<fetch-output failed: {exc}>"
+
+    result_rows = get_result_rows({**container, "id": container_id})
+    scrape_success_marker = output_shows_scrape_success({**container, "id": container_id})
+
+    # Try to extract linkedinID like poll_phase1 does
+    org_id = None
+    if result_rows:
+        first = result_rows[0]
+        org_id = (
+            first.get("linkedinID") or first.get("mainCompanyID") or
+            first.get("linkedInId") or first.get("companyId") or
+            first.get("id") or first.get("linkedinId")
+        )
+
+    return {
+        "stage":                    "finished",
+        "container_id":             container_id,
+        "linkedin_url_input":       linkedin_url,
+        "container_status":         container.get("status"),
+        "container_exit_code":      container.get("exitCode"),
+        "is_error":                 is_error(container),
+        "result_object_raw":        container.get("resultObject"),
+        "result_object_type":       type(container.get("resultObject")).__name__,
+        "get_result_rows_len":      len(result_rows),
+        "get_result_rows_first":    result_rows[0] if result_rows else None,
+        "output_shows_success":     scrape_success_marker,
+        "raw_output_length":        len(raw_output),
+        "raw_output_first_2000":    raw_output[:2000],
+        "raw_output_last_2000":     raw_output[-2000:] if len(raw_output) > 2000 else "",
+        "extracted_org_id":         str(org_id) if org_id else None,
+        "waited_s":                 elapsed,
+    }
