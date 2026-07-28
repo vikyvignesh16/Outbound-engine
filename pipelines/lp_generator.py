@@ -6,8 +6,8 @@ landing page for the Email 1 LP teaser anchor. The API is slow (35-45s per
 call) and idempotent per company, so we cache one row per domain forever
 in company_lp_cache. Subsequent contacts at the same company reuse the URL.
 
-Markets are mapped from our internal codes (UK / Ireland / DE / AT / CH / US)
-to the API's enum (UKI / DACH / USA).
+Markets are mapped from our internal codes (UK / Ireland / DE / AT / CH / US / FR)
+to the API's enum (UKI / DACH / USA / FR).
 
 Flow per domain:
   1. Look up company_lp_cache.
@@ -50,6 +50,8 @@ _MARKET_MAP: dict[str, str] = {
     "AT":      "DACH",
     "CH":      "DACH",
     "US":      "USA",
+    "FR":      "FR",
+    "France":  "FR",
 }
 
 
