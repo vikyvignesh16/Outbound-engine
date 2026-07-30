@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
@@ -11,8 +12,29 @@ from db.client import get_supabase, fetch_all
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-TECHNOGRAPHIC_BASE_URL = "https://data-ai-gen-public.brevo.tech"
+TECHSTACK_API_BASE_URL = os.environ.get("TECHSTACK_API_BASE_URL", "https://techstack-api-pzd1.onrender.com")
 BREVO_CRM_BASE_URL = "https://api.brevo.com/v3"
+
+# Hard cap documented by the Technographics API: 30 requests/minute, no per-key
+# burst allowance. _TECH_CONCURRENCY > 1 exists to overlap request latency
+# (~10s warm, 30-60s cold-start on Render's free tier) against that ceiling —
+# without it, serial calls are latency-bound (~6/min at 10s/call), well under
+# what the rate limit would actually allow.
+_TECH_RATE_LIMIT   = 30
+_TECH_RATE_WINDOW  = 60.0
+_TECH_CONCURRENCY  = 1  # temporarily serialized to test whether concurrency=6
+                        # piling up requests against a cold-starting backend is
+                        # causing the persistent 429s seen 2026-07-16 — revert
+                        # to 6 once confirmed either way.
+
+# The API's category lists (esp, crm, etc.) mix in email-auth DNS artifacts
+# (SPF/DKIM/DMARC/BIMI records) that aren't real tools — filtered out before scoring.
+_NOISE_SUBSTRINGS = ("spf", "dkim", "dmarc", "bimi")
+
+_TECH_LIST_CATEGORIES = [
+    "crm", "cms", "ecommerce", "analytics", "cdn",
+    "payment", "marketing", "chat", "hosting", "ab_testing", "tag_manager",
+]
 
 # (keywords, score) — checked in order; first match wins per ESP entry
 COMPETITOR_ESP_SCORES: list[tuple[set[str], int]] = [
@@ -174,7 +196,7 @@ async def run_qualification_rules() -> dict:
     rows = fetch_all(
         "sourced_tam_v2",
         "id, domain, market, company_name, company_type, employee_range, "
-        "location, country, linkedin_url, vertical, "
+        "location, country, linkedin_url, vertical, tam_segment, "
         "brevo_company_id, planhat_id, open_deals, deal_lost_date",
         [("eq", "crm_checked", True), ("eq", "qualification_checked", False)],
     )
@@ -200,6 +222,7 @@ async def run_qualification_rules() -> dict:
                 "country":           row.get("country"),
                 "linkedin_url":      row.get("linkedin_url"),
                 "vertical":          row.get("vertical"),
+                "tam_segment":       row.get("tam_segment"),
                 "brevo_company_id":  row.get("brevo_company_id"),
                 "planhat_id":        row.get("planhat_id"),
                 "open_deals":        row.get("open_deals"),
@@ -236,172 +259,185 @@ async def run_qualification_rules() -> dict:
 
 # ── Technographic API call ────────────────────────────────────────────────────
 
-def _filter_builtwith_crm(data: dict) -> list[dict]:
-    """
-    Extracts recognized ESPs from BuiltWith's tech_stack.crm, filtering out:
-    - Entries with "SPF" in the name (DNS artifacts BuiltWith surfaces in the CRM list)
-    - Tools that don't match our known ESP scoring table (Slack, Office 365, etc.)
-    Only tools with an explicit score in COMPETITOR_ESP_SCORES are kept.
-    """
-    crm_tools = (data.get("tech_stack") or {}).get("crm") or []
-    return [
-        {"name": t} for t in crm_tools
-        if t
-        and t.lower() != "unknown"
-        and "spf" not in t.lower()
-        and _score_one_esp(t) != _DEFAULT_ESP_SCORE
+class _AsyncRateLimiter:
+    """Strict evenly-paced limiter: enforces a minimum interval between
+    consecutive dispatches (60/limit seconds apart), not a sliding-window count.
+
+    A sliding window allows bursts — e.g. concurrency letting several requests
+    all dispatch within the same instant once the window has "room" — and a
+    live production run confirmed this Technographic API rejects those bursts
+    with 429s even while the 60s average stays under the documented 30/min cap.
+    It behaves like a strict token bucket, not a smooth window, so we now match
+    that: the lock is held for the ENTIRE sleep, serializing every dispatch to
+    one every ~2s regardless of how many coroutines are waiting."""
+
+    def __init__(self, limit: int = _TECH_RATE_LIMIT, window: float = _TECH_RATE_WINDOW):
+        self._min_interval = window / limit
+        self._lock = asyncio.Lock()
+        self._last_dispatch = 0.0
+
+    async def wait(self) -> None:
+        async with self._lock:
+            now = asyncio.get_event_loop().time()
+            wait_for = self._min_interval - (now - self._last_dispatch)
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+            self._last_dispatch = asyncio.get_event_loop().time()
+
+
+def _clean_tool_names(tools: list[dict] | None) -> list[str]:
+    """Strips SPF/DKIM/DMARC/BIMI auth-artifact noise, prefers high-confidence
+    names, falls back to medium if no high-confidence names remain."""
+    if not tools:
+        return []
+    filtered = [
+        t for t in tools
+        if t.get("name") and not any(n in t["name"].lower() for n in _NOISE_SUBSTRINGS)
     ]
+    high = [t["name"] for t in filtered if t.get("confidence") == "high"]
+    if high:
+        return high
+    return [t["name"] for t in filtered if t.get("confidence") == "medium"]
 
 
-def _select_esp_list(data: dict) -> list[dict]:
-    """
-    Prefers BuiltWith client-side detection (tech_stack.crm, 180-day recency)
-    over DNS-based detection (esp_detection.services_detected).
-    DNS records are often 6-12 months stale post-migration.
-    """
-    builtwith = _filter_builtwith_crm(data)
-    if builtwith:
-        return builtwith
-    dns_services = (data.get("esp_detection") or {}).get("services_detected") or []
-    return [{"name": s} for s in dns_services if s and s.lower() != "unknown"]
+def _flatten_tools(tools: list[dict] | None) -> str | None:
+    names = _clean_tool_names(tools)
+    return "|".join(names) if names else None
 
 
 async def get_techstack(domain: str, client: httpx.AsyncClient) -> dict:
-    """Calls the Technographic API with exponential backoff on 500 errors."""
-    url = f"{TECHNOGRAPHIC_BASE_URL}/v1/data-enrichment/domain-analysis"
-    headers = {
-        "CF-Access-Client-Id":     os.environ["CF_ACCESS_CLIENT_ID"],
-        "CF-Access-Client-Secret": os.environ["CF_ACCESS_CLIENT_SECRET"],
-    }
-
-    for attempt, wait in enumerate([0, 1, 2, 4]):
-        if wait:
-            await asyncio.sleep(wait)
-        try:
-            resp = await client.post(url, headers=headers, json={"domain": domain}, timeout=30.0)
-            if resp.status_code == 500 and attempt < 3:
-                logger.warning("techstack: 500 for %s, retrying (attempt %d)", domain, attempt + 1)
-                continue
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 500 and attempt < 3:
-                continue
-            raise
-    raise RuntimeError(f"techstack: all retries exhausted for {domain}")
+    """Calls the Technographics API. Caller is responsible for rate-limiting
+    (30 req/min hard cap) and for handling 429/404/other errors."""
+    resp = await client.get(
+        f"{TECHSTACK_API_BASE_URL}/api/techstack",
+        params={"domain": domain, "mode": "smart"},
+        headers={"X-API-Key": os.environ["TECHSTACK_API_KEY"]},
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 # ── Step 4: Technographic enrichment ─────────────────────────────────────────
 
 async def run_technographic() -> dict:
     """
-    Reads qualified_tam_v2 rows with no esp_score yet,
-    calls Technographic API per domain, and writes esp_detected + esp_score back.
+    Reads qualified_tam_v2 rows not yet checked (tech_checked_at IS NULL), calls
+    the Technographics API respecting the hard 30 req/min limit, and writes the
+    tech_* columns + derived esp_detected/esp_score back.
+
+    429 -> sleep 60s, retry once, then give up on this row for this run (retried
+           next run since tech_checked_at is left untouched).
+    404 -> domain not found; mark checked with all tech_* fields left null.
+    other 4xx/5xx or network error -> log + leave for retry next run.
+
+    Guarded by a Supabase-backed lock (pipeline_locks) so a concurrent call —
+    e.g. the daily-pipeline cron firing mid-way through a large manual backlog
+    run — skips instead of spinning up a second _AsyncRateLimiter that would
+    compete for the same external 30 req/min budget and risk 429 storms.
     """
     sb = get_supabase()
-    rows = fetch_all("qualified_tam_v2", "domain, market", [("is_", "esp_score", "null")])
+    try:
+        sb.table("pipeline_locks").insert({"name": "technographic"}).execute()
+    except Exception:
+        logger.warning("technographic: lock already held — skipping this run (another call is in progress)")
+        return {"status": "skipped", "reason": "already_running", "processed": 0}
+
+    try:
+        return await _run_technographic_locked(sb)
+    finally:
+        sb.table("pipeline_locks").delete().eq("name", "technographic").execute()
+
+
+async def _run_technographic_locked(sb) -> dict:
+    rows = fetch_all("qualified_tam_v2", "domain, market", [("is_", "tech_checked_at", "null")])
 
     if not rows:
         logger.info("technographic: no rows to process")
         return {"status": "ok", "processed": 0}
 
     logger.info("technographic: processing %d domains", len(rows))
-    semaphore = asyncio.Semaphore(25)
+    limiter = _AsyncRateLimiter()
+    semaphore = asyncio.Semaphore(_TECH_CONCURRENCY)
 
     async def fetch_one(row: dict) -> dict | None:
-        domain = row["domain"]
+        domain, market = row["domain"], row["market"]
         async with semaphore:
-            try:
-                async with httpx.AsyncClient() as client:
+            await limiter.wait()
+            async with httpx.AsyncClient() as client:
+                try:
                     data = await get_techstack(domain, client)
-                esp_list = _select_esp_list(data)
-                return {
-                    "domain":       domain,
-                    "market":       row["market"],
-                    "esp_detected": get_primary_esp(esp_list),
-                    "esp_score":    compute_esp_score(esp_list),
-                }
-            except Exception as exc:
-                logger.error("techstack: failed for %s: %s", domain, exc)
-                return None
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code
+                    if status == 429:
+                        await asyncio.sleep(60)
+                        try:
+                            data = await get_techstack(domain, client)
+                        except Exception:
+                            logger.error("techstack: 429 retry failed for %s", domain)
+                            return None
+                    elif status == 404:
+                        return {"domain": domain, "market": market, "payload": {}}
+                    else:
+                        logger.error("techstack: HTTP %s for %s", status, domain)
+                        return None
+                except Exception as exc:
+                    logger.error("techstack: request failed for %s: %s", domain, exc)
+                    return None
+
+            esp_names = _clean_tool_names(data.get("esp"))
+            esp_list = [{"name": n} for n in esp_names]
+            payload = {
+                "tech_score":          data.get("tech_score"),
+                # Doc says "tech_score_primary"; live API actually returns "tech_stack_primary" —
+                # check both (France_TAM's own client independently hit the same discrepancy).
+                "tech_stack_primary":  data.get("tech_stack_primary") or data.get("tech_score_primary"),
+                "tech_category":       data.get("tech_category"),
+                "tech_esp":            "|".join(esp_names) if esp_names else None,
+                "esp_detected":        get_primary_esp(esp_list) if esp_list else None,
+                "esp_score":           compute_esp_score(esp_list),
+            }
+            for category in _TECH_LIST_CATEGORIES:
+                payload[f"tech_{category}"] = _flatten_tools(data.get(category))
+            return {"domain": domain, "market": market, "payload": payload}
 
     results = await asyncio.gather(*[fetch_one(r) for r in rows])
     enriched = [r for r in results if r is not None]
 
-    for result in enriched:
-        sb.table("qualified_tam_v2").update({
-            "esp_detected": result["esp_detected"],
-            "esp_score":    result["esp_score"],
-        }).eq("domain", result["domain"]).eq("market", result["market"]).execute()
+    # Each write is isolated: a transient failure on one row must not throw away
+    # every already-fetched result queued after it in this list. (A live run lost
+    # ~12k successfully-checked domains this way — the loop hit one bad write,
+    # raised, and skipped straight past the final "wrote" log with nothing
+    # persisted for anything still unwritten at that point.)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    write_failures = 0
+    for r in enriched:
+        payload = {**r["payload"], "tech_checked_at": now_iso}
+        try:
+            sb.table("qualified_tam_v2").update(payload).eq("domain", r["domain"]).eq("market", r["market"]).execute()
+        except Exception as exc:
+            write_failures += 1
+            logger.error("technographic: write failed for %s/%s: %s — left for retry", r["domain"], r["market"], exc)
 
-    logger.info("technographic: wrote %d results", len(enriched))
-    return {"status": "ok", "processed": len(enriched)}
-
-
-# ── Step 4b: Technographic comparison (BuiltWith vs DNS) ─────────────────────
-
-def _builtwith_primary_esp(data: dict) -> str | None:
-    """Returns the highest-scored ESP from BuiltWith CRM list only — no DNS fallback."""
-    filtered = _filter_builtwith_crm(data)
-    return get_primary_esp(filtered) if filtered else None
-
-
-async def run_technographic_compare() -> dict:
-    """
-    Calls the new technographic endpoint for already-processed rows (esp_score IS NOT NULL)
-    and writes only esp_detected_builtwith — never touches esp_detected or esp_score.
-    Run once to build the comparison dataset; re-running is safe (skips already-filled rows).
-    """
-    sb = get_supabase()
-    rows = fetch_all(
-        "qualified_tam_v2",
-        "domain, market",
-        [("not_", "esp_score", "is", "null"), ("is_", "esp_detected_builtwith", "null")],
-    )
-
-    if not rows:
-        logger.info("techstack_compare: no rows to process")
-        return {"status": "ok", "processed": 0}
-
-    logger.info("techstack_compare: processing %d domains", len(rows))
-    semaphore = asyncio.Semaphore(25)
-
-    async def fetch_one(row: dict) -> dict | None:
-        domain = row["domain"]
-        async with semaphore:
-            try:
-                async with httpx.AsyncClient() as client:
-                    data = await get_techstack(domain, client)
-                return {
-                    "domain":    domain,
-                    "market":    row["market"],
-                    "builtwith": _builtwith_primary_esp(data),
-                }
-            except Exception as exc:
-                logger.error("techstack_compare: failed for %s: %s", domain, exc)
-                return None
-
-    results = await asyncio.gather(*[fetch_one(r) for r in rows])
-    enriched = [r for r in results if r is not None]
-
-    for result in enriched:
-        sb.table("qualified_tam_v2").update({
-            "esp_detected_builtwith": result["builtwith"],
-        }).eq("domain", result["domain"]).eq("market", result["market"]).execute()
-
-    logger.info("techstack_compare: wrote %d results", len(enriched))
-    return {"status": "ok", "processed": len(enriched)}
+    left_for_retry = len(rows) - len(enriched) + write_failures
+    logger.info("technographic: wrote %d results (%d write failures, %d left for retry)",
+                len(enriched) - write_failures, write_failures, left_for_retry)
+    return {"status": "ok", "processed": len(enriched) - write_failures, "left_for_retry": left_for_retry}
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("/pipelines/qualify")
-async def run_qualification(background_tasks: BackgroundTasks):
-    """Runs Steps 2-4 in background: CRM check → qualification rules → technographic."""
+async def run_qualification(background_tasks: BackgroundTasks, crm_limit: int = 1000):
+    """Runs Steps 2-4 in background: CRM check → qualification rules → technographic.
+
+    crm_limit caps how many crm_checked=False rows Step 2 processes in this call
+    (default 1000 for the normal daily cron). Pass a higher value to clear a large
+    backlog in one shot — e.g. after a bulk sourced_tam_v2 import."""
     async def _run():
         from utils.slack import notify
         try:
-            crm = await run_crm_check()
+            crm = await run_crm_check(limit=crm_limit)
             rules = await run_qualification_rules()
             tech = await run_technographic()
             await notify(
@@ -414,25 +450,6 @@ async def run_qualification(background_tasks: BackgroundTasks):
             from utils.slack import notify
             await notify(f"❌ *Qualify pipeline failed* — `{exc}`", success=False)
             logger.exception("qualify: failed")
-    background_tasks.add_task(_run)
-    return {"status": "started"}
-
-
-@router.post("/pipelines/technographic-compare")
-async def technographic_compare_endpoint(background_tasks: BackgroundTasks):
-    """Fills esp_detected_builtwith for already-processed rows. Non-destructive comparison run."""
-    async def _run():
-        from utils.slack import notify
-        try:
-            result = await run_technographic_compare()
-            await notify(
-                f"✅ *Technographic compare complete*\n"
-                f"• Processed: {result['processed']:,} rows\n"
-                f"• esp_detected_builtwith now populated — run comparison query to see delta"
-            )
-        except Exception as exc:
-            await notify(f"❌ *Technographic compare failed* — `{exc}`", success=False)
-            logger.exception("technographic_compare_endpoint: failed")
     background_tasks.add_task(_run)
     return {"status": "started"}
 
