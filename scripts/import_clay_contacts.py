@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.client import get_supabase  # noqa: E402
+from utils.linkedin import normalise_linkedin_url  # noqa: E402
 
 BATCH_NUMBER = 2
 
@@ -45,24 +46,6 @@ COLUMN_MAP = {
     "relevance_score":     "Job Title Relevance Score relevance Score",
     "relevance_reasoning": "Job Title Relevance Score reasoning",
 }
-
-
-def normalise_linkedin_url(url: str) -> str:
-    """Canonicalise a LinkedIn URL for cross-source dedup.
-
-    Lowercases, drops https?:// + www. + trailing slash + query/fragment.
-    e.g. "https://www.linkedin.com/in/Foo/" → "linkedin.com/in/foo"
-    """
-    u = (url or "").strip().lower()
-    if not u:
-        return ""
-    for prefix in ("https://", "http://"):
-        if u.startswith(prefix):
-            u = u[len(prefix):]
-            break
-    if u.startswith("www."):
-        u = u[4:]
-    return u.rstrip("/").split("?", 1)[0].split("#", 1)[0]
 
 
 def _coerce_int(val: str | None) -> int | None:

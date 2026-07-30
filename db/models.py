@@ -42,22 +42,27 @@ class ClayTAMPayload(RootModel[List[ClayTAMRow]]):
 
 # ── Clay Contacts ─────────────────────────────────────────────────────────────
 
-class ClayContactRow(BaseModel):
-    # ⚠️ PENDING: update field names from real Clay contacts payload
+class ClayContactWebhookPayload(BaseModel):
+    """One contact per webhook call — Clay's 'send to webhook' action fires
+    once per row. Field names match sourced_contacts columns directly (Clay's
+    webhook action is configured to send these exact keys), so there's no
+    per-batch CSV header remapping the way scripts/import_clay_contacts.py
+    needs for manual exports.
+    """
     domain: str
+    linkedin_url: str
+    market: str
+    company_name: Optional[str] = None
     email: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     job_title: Optional[str] = None
     seniority: Optional[str] = None
-    linkedin_url: Optional[str] = None
-    company_name: Optional[str] = None
-    market: Optional[str] = None
+    relevance_score: Optional[int] = None
+    relevance_reasoning: Optional[str] = None
+    location: Optional[str] = None
+    country: Optional[str] = None
     batch_number: Optional[int] = None
-
-class ClayContactsPayload(BaseModel):
-    run_id: str
-    rows: List[ClayContactRow]
 
 # ── Albacross ─────────────────────────────────────────────────────────────────
 
