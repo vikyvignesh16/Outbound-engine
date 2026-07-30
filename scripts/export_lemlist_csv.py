@@ -1,22 +1,33 @@
-"""Export batch 1 contacts to a single Lemlist-ready CSV.
+"""Export one market group's batch contacts to a Lemlist-ready CSV.
 
-Produces one file with all 1,134 contacts:
-  - data/batch1_lemlist.csv
+Produces one file per market group:
+  - data/batch{N}_lemlist_{group}.csv
 
 Each row carries the standard Lemlist contact fields (email, first_name,
 last_name, linkedin_url, company_name) plus every outbound_content field
 referenced in the Lemlist template (subject lines, paragraphs, body+cta
 splits, resource URLs, personalised LP URL). The `channel` column tags
-each row as "email" (959), "linkedin_only" (175), or "none" so you can
-filter at upload time if you want to split into separate Lemlist campaigns.
+each row as "email", "linkedin_only", or "none" so you can filter at
+upload time if you want to further split into separate Lemlist campaigns.
+
+batch_number is scoped PER MARKET GROUP (see pipelines/monthly_batch.py's
+MARKET_GROUPS) — UKI's batch 1, DACH's batch 1, US's batch 1, and FR's
+batch 1 are four different, unrelated cohorts that all happen to share the
+number 1. Filtering on batch_number alone (as this script used to) would
+silently merge all four into one export the moment more than one group has
+generated content for the same batch_number — a real risk today since UKI's
+original batch 1 already has content while DACH/US/FR's own batch 1s are
+generating now. --market-group is required specifically to prevent that.
 
 LinkedIn URLs in sourced_contacts are normalised (no scheme, no www).
 This script reconstructs them as https://www.linkedin.com/in/<slug> so
 Lemlist's LinkedIn extension can open the profile.
 
 Usage:
-    source .env && python scripts/export_lemlist_csv.py
+    source .env && python scripts/export_lemlist_csv.py --market-group UKI
+    source .env && python scripts/export_lemlist_csv.py --market-group US --batch-number 1
 """
+import argparse
 import csv
 import logging
 import sys
@@ -33,6 +44,7 @@ for noisy in ("httpx", "httpcore"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 from db.client import fetch_all  # noqa: E402
+from pipelines.monthly_batch import MARKET_GROUPS  # noqa: E402
 
 logger = logging.getLogger("export_lemlist_csv")
 
@@ -128,12 +140,27 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def main() -> None:
-    logger.info("loading batch-1 contacts with generated content...")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--market-group", required=True, choices=sorted(MARKET_GROUPS),
+        help="Export only this group's contacts (batch_number is scoped per group, not global).",
+    )
+    parser.add_argument(
+        "--batch-number", type=int, default=1,
+        help="Which batch number within the group to export (default 1).",
+    )
+    args = parser.parse_args()
+    markets = MARKET_GROUPS[args.market_group]
+
+    logger.info(
+        "loading %s batch-%d contacts (%s) with generated content...",
+        args.market_group, args.batch_number, ", ".join(sorted(markets)),
+    )
     contacts = fetch_all(
         "sourced_contacts",
         "id, email, first_name, last_name, linkedin_url, company_name, "
         "domain, market, outbound_content, content_generated_at",
-        [("eq", "batch_number", 1)],
+        [("eq", "batch_number", args.batch_number), ("in_", "market", list(markets))],
     )
     with_content = [c for c in contacts if c.get("content_generated_at") and c.get("outbound_content")]
     logger.info("loaded %d total, %d with generated content", len(contacts), len(with_content))
@@ -148,11 +175,12 @@ def main() -> None:
                 by_channel["email"], by_channel["linkedin_only"], by_channel["none"])
 
     data_dir = Path(__file__).resolve().parents[1] / "data"
-    _write_csv(data_dir / "batch1_lemlist.csv", flattened)
+    out_name = f"batch{args.batch_number}_lemlist_{args.market_group.lower()}.csv"
+    _write_csv(data_dir / out_name, flattened)
 
     print()
     print("=" * 60)
-    print(f"✅ Wrote {len(flattened):4d} contacts → data/batch1_lemlist.csv")
+    print(f"✅ Wrote {len(flattened):4d} contacts → data/{out_name}")
     print(f"   channel breakdown: {by_channel['email']} email | "
           f"{by_channel['linkedin_only']} linkedin_only | {by_channel['none']} none")
     print("=" * 60)
