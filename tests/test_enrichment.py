@@ -40,7 +40,7 @@ def _make_result(custom_id: str, response_dict: dict, result_type: str = "succee
     result.custom_id = custom_id
     result.result.type = result_type
     if result_type == "succeeded":
-        result.result.message.content = [MagicMock(text=json.dumps(response_dict))]
+        result.result.message.content = [MagicMock(type="text", text=json.dumps(response_dict))]
         result.result.message.usage.input_tokens = input_tokens
         result.result.message.usage.output_tokens = output_tokens
     return result
@@ -297,7 +297,7 @@ def test_prioritize_endpoint_upserts_qualifying_rows():
         resp = tc.post("/pipelines/prioritize")
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "prioritized": 2}
+    assert resp.json() == {"status": "ok", "message": "started_in_background"}
     mock_sb.table.return_value.upsert.assert_called_once()
 
 
@@ -311,5 +311,5 @@ def test_prioritize_endpoint_no_qualifying_rows():
         resp = tc.post("/pipelines/prioritize")
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "prioritized": 0}
+    assert resp.json() == {"status": "ok", "message": "started_in_background"}
     mock_sb.table.return_value.upsert.assert_not_called()

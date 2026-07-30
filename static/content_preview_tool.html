@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Content Preview Tool</title>
+<style>
+  :root {
+    --paper: #F7F3EA; --paper-raised: #FFFFFF; --ink: #1B2420; --ink-soft: #5B665F;
+    --ink-faint: #8A9490; --border: #DED6C1; --accent: #0B8F5F; --accent-ink: #FFFFFF;
+    --accent-soft: #E3F3EA; --accent2: #6C5CE0; --accent2-soft: #EBE8FB;
+    --err: #C1443D; --err-soft: #FBEAE9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #12181A; --paper-raised: #1B2426; --ink: #E9EFE9; --ink-soft: #A6B3AC;
+      --ink-faint: #6E7A74; --border: #2C3835; --accent: #34C98A; --accent-ink: #0B1210;
+      --accent-soft: #17332A; --accent2: #A79BFF; --accent2-soft: #241F3D;
+      --err: #FF6B63; --err-soft: #341A19;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    padding: 20px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 {
+    margin: 0; font-size: 1.35rem; letter-spacing: -0.01em;
+    font-family: ui-rounded, "SF Pro Rounded", "Century Gothic", sans-serif; font-weight: 700;
+  }
+  header p { margin: 2px 0 0; color: var(--ink-soft); font-size: 0.85rem; }
+
+  .secret-bar {
+    display: flex; align-items: center; gap: 8px; padding: 10px 24px;
+    background: var(--paper-raised); border-bottom: 1px solid var(--border);
+  }
+  .secret-bar input {
+    font-family: inherit; font-size: 0.82rem; padding: 6px 10px; border: 1px solid var(--border);
+    border-radius: 7px; background: var(--paper); color: var(--ink); width: 220px;
+  }
+  .secret-bar .status { font-size: 0.78rem; color: var(--ink-faint); }
+  .secret-bar .status.ok { color: var(--accent); }
+
+  .layout { display: grid; grid-template-columns: 380px 1fr; min-height: calc(100vh - 110px); }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+  .form-pane { border-right: 1px solid var(--border); padding: 20px 22px 60px; overflow-y: auto; max-height: calc(100vh - 110px); }
+  @media (max-width: 900px) { .form-pane { border-right: none; border-bottom: 1px solid var(--border); max-height: none; } }
+
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+  .preset-btn {
+    font-family: inherit; font-size: 0.76rem; font-weight: 600; padding: 6px 10px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--paper-raised); color: var(--ink-soft); cursor: pointer;
+  }
+  .preset-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  fieldset { border: none; padding: 0; margin: 0 0 18px; }
+  fieldset legend {
+    font-family: ui-rounded, "SF Pro Rounded", "Century Gothic", sans-serif; font-weight: 700;
+    font-size: 0.7rem; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 8px;
+  }
+  .field { margin-bottom: 10px; }
+  .field label { display: block; font-size: 0.75rem; font-weight: 600; color: var(--ink-soft); margin-bottom: 3px; }
+  .field input[type="text"], .field input[type="number"], .field select, .field textarea {
+    width: 100%; font-family: inherit; font-size: 0.83rem; color: var(--ink); background: var(--paper-raised);
+    border: 1px solid var(--border); border-radius: 7px; padding: 6px 9px;
+  }
+  .field textarea { resize: vertical; min-height: 48px; line-height: 1.4; }
+  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+  .checkbox-row input { width: 15px; height: 15px; accent-color: var(--accent); }
+  .checkbox-row label { font-size: 0.8rem; margin: 0; font-weight: 500; }
+  .news-extra { display: none; margin-top: 8px; }
+  .news-extra.visible { display: block; }
+
+  .generate-btn {
+    width: 100%; font-family: inherit; font-size: 0.92rem; font-weight: 700; padding: 11px;
+    border-radius: 8px; border: none; background: var(--accent); color: var(--accent-ink); cursor: pointer;
+    margin-top: 8px;
+  }
+  .generate-btn:hover { opacity: 0.9; }
+  .generate-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .output-pane { padding: 24px 28px 60px; overflow-y: auto; max-height: calc(100vh - 110px); }
+  .placeholder { color: var(--ink-faint); font-size: 0.9rem; padding: 40px 0; text-align: center; }
+  .spinner-wrap { text-align: center; padding: 60px 0; color: var(--ink-soft); font-size: 0.9rem; }
+
+  .error-box { background: var(--err-soft); color: var(--err); border-radius: 8px; padding: 14px 16px; font-size: 0.85rem; white-space: pre-wrap; }
+
+  .seq-card {
+    background: var(--paper-raised); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; margin-bottom: 14px;
+  }
+  .seq-card .label {
+    font-family: ui-rounded, "SF Pro Rounded", "Century Gothic", sans-serif; font-weight: 700;
+    font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); margin-bottom: 6px;
+  }
+  .seq-card .subject { font-weight: 700; font-size: 0.95rem; margin-bottom: 8px; }
+  .seq-card .body-text { font-size: 0.88rem; line-height: 1.55; white-space: pre-wrap; }
+  .seq-card .cta { color: var(--accent2); font-weight: 600; }
+  .seq-card .resource-tag {
+    display: inline-block; font-size: 0.72rem; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+    background: var(--accent2-soft); color: var(--accent2); margin-top: 8px;
+  }
+  .seq-card .resource-tag a { color: inherit; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Content Preview Tool</h1>
+    <p>Generates a real outbound sequence via the live API — not a preview of the prompt.</p>
+  </div>
+</header>
+
+<div class="secret-bar">
+  <label for="secretInput" style="font-size:0.82rem;font-weight:600;">Secret:</label>
+  <input type="password" id="secretInput" placeholder="X-Preview-Secret">
+  <span class="status" id="secretStatus"></span>
+</div>
+
+<div class="layout">
+  <div class="form-pane">
+    <div class="presets" id="presets"></div>
+
+    <fieldset>
+      <legend>Contact</legend>
+      <div class="row-2">
+        <div class="field"><label>First name</label><input type="text" id="first_name" value="Jamie"></div>
+        <div class="field"><label>Last name</label><input type="text" id="last_name" value="Voss"></div>
+      </div>
+      <div class="field"><label>Job title</label><input type="text" id="job_title" value="Marketing Manager"></div>
+      <div class="field"><label>Relevance score (1-5 — job-title relevance to marketing/CRM, see score_contacts.py)</label><input type="number" id="relevance_score" min="1" max="5" value="5"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Company</legend>
+      <div class="field">
+        <label>Market</label>
+        <select id="market">
+          <option value="US">US</option>
+          <option value="UK" selected>UK</option>
+          <option value="Ireland">Ireland</option>
+          <option value="FR">FR</option>
+          <option value="DE">DE</option>
+          <option value="AT">AT</option>
+          <option value="CH">CH</option>
+        </select>
+      </div>
+      <div class="field"><label>Company name</label><input type="text" id="company_name" value="One Stop Retail Group"></div>
+      <div class="field"><label>Domain (used to look up real news — leave blank to skip)</label><input type="text" id="domain" value=""></div>
+      <div class="field"><label>Vertical</label><input type="text" id="vertical" value="Retail"></div>
+      <div class="row-2">
+        <div class="field"><label>ESP detected</label><input type="text" id="esp_detected" value="Mandrill"></div>
+        <div class="field"><label>ESP score (0-100)</label><input type="number" id="esp_score" value="80"></div>
+      </div>
+      <div class="field"><label>Account fit score (1-5)</label><input type="number" id="account_fit_score" value="5"></div>
+      <div class="checkbox-row"><input type="checkbox" id="has_loyalty_program" checked><label for="has_loyalty_program">has_loyalty_program</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="has_wallet"><label for="has_wallet">has_wallet</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="needs_cdp"><label for="needs_cdp">needs_cdp</label></div>
+      <div class="field"><label>account_narrative</label><textarea id="account_narrative">One Stop is a UK convenience retail franchise network with 1,000+ locations, running loyalty and transactional email through Mandrill.</textarea></div>
+      <div class="field"><label>email_crm_activity</label><textarea id="email_crm_activity">Sends loyalty offers and transactional receipts via Mandrill across the franchise network.</textarea></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>ICP Archetype</legend>
+      <div class="field">
+        <label>icp_archetype_primary</label>
+        <select id="icp_archetype_primary">
+          <option value="">(empty)</option>
+          <option value="None">None</option>
+          <option value="Graduate">Graduate</option>
+          <option value="Network" selected>Network</option>
+          <option value="Consolidator">Consolidator</option>
+          <option value="Email Specialist">Email Specialist</option>
+          <option value="Feature Specialist">Feature Specialist</option>
+          <option value="Saver">Saver</option>
+        </select>
+      </div>
+      <div class="field"><label>icp_archetype_evidence</label><textarea id="icp_archetype_evidence">Operates 1,000+ franchise locations across the UK; recently hired a Regional Marketing Manager to standardise messaging across the network.</textarea></div>
+    </fieldset>
+
+    <button class="generate-btn" id="generateBtn">Generate real sequence</button>
+  </div>
+
+  <div class="output-pane" id="outputPane">
+    <div class="placeholder">Fill in the fields and click Generate to call the live API.</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  function el(id) { return document.getElementById(id); }
+
+  var PRESETS = [
+    { label: "Graduate — UK SaaS", market: "UK", company_name: "Ledgerly", vertical: "Tech/SaaS", esp_detected: "Mailchimp", esp_score: 40, account_fit_score: 4,
+      has_loyalty_program: false, has_wallet: false, needs_cdp: false,
+      account_narrative: "Ledgerly is a fast-growing UK accounting SaaS that raised a Series A eight months ago.",
+      email_crm_activity: "Sends onboarding and billing emails via Mailchimp to a rapidly growing user base.",
+      icp_archetype_primary: "Graduate", icp_archetype_evidence: "Raised a $6M Series A seven months ago and posted its first ever Lifecycle Marketing Manager role last month." },
+    { label: "Network — UK Retail", market: "UK", company_name: "One Stop Retail Group", vertical: "Retail", esp_detected: "Mandrill", esp_score: 80, account_fit_score: 5,
+      has_loyalty_program: true, has_wallet: false, needs_cdp: false,
+      account_narrative: "One Stop is a UK convenience retail franchise network with 1,000+ locations, running loyalty and transactional email through Mandrill.",
+      email_crm_activity: "Sends loyalty offers and transactional receipts via Mandrill across the franchise network.",
+      icp_archetype_primary: "Network", icp_archetype_evidence: "Operates 1,000+ franchise locations across the UK; recently hired a Regional Marketing Manager to standardise messaging across the network." },
+    { label: "Consolidator — US Ecommerce", market: "US", company_name: "Harlow & Finch", vertical: "Retail / Ecommerce", esp_detected: "Klaviyo", esp_score: 60, account_fit_score: 4,
+      has_loyalty_program: false, has_wallet: false, needs_cdp: true,
+      account_narrative: "Harlow & Finch is a mid-market DTC ecommerce brand running Klaviyo alongside a separately-purchased CDP.",
+      email_crm_activity: "Runs email through Klaviyo and SMS through a separate vendor, with a newly implemented Segment CDP.",
+      icp_archetype_primary: "Consolidator", icp_archetype_evidence: "Implemented Segment CDP three months ago and hired a new VP Marketing Operations in the same quarter." },
+    { label: "Email Specialist — Ireland Fintech", market: "Ireland", company_name: "Fennel Pay", vertical: "Fintech", esp_detected: "Amazon SES", esp_score: 85, account_fit_score: 4,
+      has_loyalty_program: false, has_wallet: false, needs_cdp: false,
+      account_narrative: "Fennel Pay is an Irish fintech sending high-volume transactional alerts and statements through Amazon SES.",
+      email_crm_activity: "High-volume transactional alerts, statements, and receipts sent via Amazon SES with dedicated sending subdomains.",
+      icp_archetype_primary: "Email Specialist", icp_archetype_evidence: "Runs dedicated sending subdomains (mail., notifications.) through Amazon SES and is hiring a Deliverability Engineer." },
+    { label: "Feature Specialist — CH Beauty", market: "CH", company_name: "Alpenglanz Cosmetics", vertical: "Beauty", esp_detected: "Hubspot", esp_score: 35, account_fit_score: 4,
+      has_loyalty_program: true, has_wallet: true, needs_cdp: false,
+      account_narrative: "Alpenglanz Cosmetics recently launched a digital rewards card ahead of its CRM's loyalty capabilities.",
+      email_crm_activity: "Sends basic newsletters via Hubspot; loyalty card launched via a separate point-solution tool.",
+      icp_archetype_primary: "Feature Specialist", icp_archetype_evidence: "Press release last month announcing a new digital rewards card built on Smile.io, run separately from its Hubspot CRM." },
+    { label: "Saver — FR Hospitality", market: "FR", company_name: "Maison Verrier", vertical: "Hospitality", esp_detected: "Salesforce Marketing Cloud", esp_score: 90, account_fit_score: 4,
+      has_loyalty_program: true, has_wallet: false, needs_cdp: false,
+      account_narrative: "Maison Verrier is a mature hotel group on Salesforce Marketing Cloud with flat headcount over the last two years.",
+      email_crm_activity: "Runs guest communications through Salesforce Marketing Cloud, an expensive contact-priced platform.",
+      icp_archetype_primary: "Saver", icp_archetype_evidence: "PE-backed since last year; recent press coverage of cost-cutting measures; renewal window opens in two months." }
+  ];
+
+  function applyPreset(p) {
+    el('market').value = p.market;
+    el('company_name').value = p.company_name;
+    el('vertical').value = p.vertical;
+    el('esp_detected').value = p.esp_detected;
+    el('esp_score').value = p.esp_score;
+    el('account_fit_score').value = p.account_fit_score;
+    el('has_loyalty_program').checked = p.has_loyalty_program;
+    el('has_wallet').checked = p.has_wallet;
+    el('needs_cdp').checked = p.needs_cdp;
+    el('account_narrative').value = p.account_narrative;
+    el('email_crm_activity').value = p.email_crm_activity;
+    el('icp_archetype_primary').value = p.icp_archetype_primary;
+    el('icp_archetype_evidence').value = p.icp_archetype_evidence;
+  }
+
+  var presetsWrap = el('presets');
+  PRESETS.forEach(function (p) {
+    var b = document.createElement('button');
+    b.className = 'preset-btn'; b.type = 'button'; b.textContent = p.label;
+    b.addEventListener('click', function () { applyPreset(p); });
+    presetsWrap.appendChild(b);
+  });
+
+  // Secret persistence
+  var secretInput = el('secretInput');
+  var savedSecret = localStorage.getItem('content_preview_secret');
+  if (savedSecret) secretInput.value = savedSecret;
+  secretInput.addEventListener('input', function () {
+    localStorage.setItem('content_preview_secret', secretInput.value);
+  });
+
+  function escapeHtml(s) {
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function renderResult(data) {
+    var out = el('outputPane');
+    var html = '';
+
+    var newsInfo = data._news_used || { found: false };
+    html += '<div class="seq-card" style="border-color:var(--accent2);">' +
+      '<div class="label" style="color:var(--accent2);">News lookup (found by the AI, not user input)</div>' +
+      (newsInfo.found
+        ? '<div class="body-text"><b>Type:</b> ' + escapeHtml(newsInfo.news_type || '') + '<br><b>Summary:</b> ' + escapeHtml(newsInfo.news_summary || '') + '</div>'
+        : '<div class="body-text" style="color:var(--ink-faint);">No qualifying recent news found for this domain (or no domain was given) — Email 1 fell back to the signal/archetype waterfall instead.</div>') +
+      '</div>';
+
+    html += '<div class="seq-card"><div class="label">Email 1 — Day 1</div>' +
+      '<div class="subject">' + escapeHtml(data.subject_line_1) + '</div>' +
+      '<div class="body-text">' + escapeHtml(data.email_1_paragraph_1) + '\n\n' + escapeHtml(data.email_1_paragraph_2) +
+      '\n\n' + escapeHtml(data.email_1_lp_teaser) + '\n\n' +
+      escapeHtml(data.email_1_p3_body || '') + ' <span class="cta">' + escapeHtml(data.email_1_p3_cta || data.email_1_paragraph_3 || '') + '</span></div></div>';
+
+    html += '<div class="seq-card"><div class="label">LinkedIn 1 — Day 3</div>' +
+      '<div class="body-text">' + escapeHtml(data.linkedin_message_1) + '</div></div>';
+
+    html += '<div class="seq-card"><div class="label">Email 2 — Day 7</div>' +
+      '<div class="subject">' + escapeHtml(data.subject_line_2) + '</div>' +
+      '<div class="body-text"><i style="color:var(--ink-faint);">Scroll-stopper hook: </i><i>' + escapeHtml(data.email_2_hook) + '</i>\n\n' + escapeHtml(data.email_2_paragraph_1) + '\n\n' +
+      escapeHtml(data.email_2_p2_body || '') + ' <span class="cta">' + escapeHtml(data.email_2_p2_cta || '') + '</span></div>' +
+      (data.selected_resource_email2_title ? '<div class="resource-tag"><a href="' + escapeHtml(data.selected_resource_email2_url || '#') + '" target="_blank">' + escapeHtml(data.selected_resource_email2_title) + '</a></div>' : '') +
+      '</div>';
+
+    html += '<div class="seq-card"><div class="label">Email 3 — Day 12</div>' +
+      '<div class="subject">' + escapeHtml(data.subject_line_3) + '</div>' +
+      '<div class="body-text">' + escapeHtml(data.email_3_paragraph_1) + '\n\n' +
+      escapeHtml(data.email_3_p2_body || '') + ' <span class="cta">' + escapeHtml(data.email_3_p2_cta || '') + '</span></div>' +
+      (data.selected_resource_email3_title ? '<div class="resource-tag"><a href="' + escapeHtml(data.selected_resource_email3_url || '#') + '" target="_blank">' + escapeHtml(data.selected_resource_email3_title) + '</a></div>' : '') +
+      '</div>';
+
+    html += '<div class="seq-card"><div class="label">LinkedIn 2 — Day 13</div>' +
+      '<div class="body-text">' + escapeHtml(data.linkedin_message_2) + '</div></div>';
+
+    html += '<div class="seq-card"><div class="label">Email 4 — Day 18</div>' +
+      '<div class="subject">' + escapeHtml(data.subject_line_4) + '</div>' +
+      '<div class="body-text">' + escapeHtml(data.email_4_paragraph_1) + '\n\n' +
+      escapeHtml(data.email_4_p2_body || '') + ' <span class="cta">' + escapeHtml(data.email_4_p2_cta || '') + '</span></div></div>';
+
+    out.innerHTML = html;
+  }
+
+  el('generateBtn').addEventListener('click', function () {
+    var secret = secretInput.value;
+    if (!secret) {
+      el('secretStatus').textContent = 'Enter the secret first';
+      el('secretStatus').className = 'status';
+      return;
+    }
+
+    var market = el('market').value;
+    var contact = {
+      first_name: el('first_name').value,
+      last_name: el('last_name').value,
+      job_title: el('job_title').value,
+      market: market,
+      relevance_score: Number(el('relevance_score').value || 0)
+    };
+    var domain = el('domain').value.trim();
+    var company = {
+      company_name: el('company_name').value,
+      domain: domain,
+      market: market,
+      vertical: el('vertical').value,
+      esp_detected: el('esp_detected').value,
+      esp_score: Number(el('esp_score').value || 0),
+      account_fit_score: Number(el('account_fit_score').value || 0),
+      has_loyalty_program: el('has_loyalty_program').checked,
+      has_wallet: el('has_wallet').checked,
+      needs_cdp: el('needs_cdp').checked,
+      account_narrative: el('account_narrative').value,
+      email_crm_activity: el('email_crm_activity').value,
+      icp_archetype_primary: el('icp_archetype_primary').value,
+      icp_archetype_evidence: el('icp_archetype_evidence').value
+    };
+
+    var btn = el('generateBtn');
+    btn.disabled = true;
+    btn.textContent = domain ? 'Generating (looking up real news + real API call)...' : 'Generating (real API call)...';
+    el('outputPane').innerHTML = '<div class="spinner-wrap">Calling the live API — this takes a few seconds...</div>';
+
+    fetch('/pipelines/content/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Preview-Secret': secret },
+      body: JSON.stringify({ contact: contact, company: company })
+    })
+      .then(function (resp) {
+        el('secretStatus').textContent = resp.status === 401 ? 'Invalid secret' : (resp.ok ? 'Connected' : '');
+        el('secretStatus').className = resp.ok ? 'status ok' : 'status';
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      })
+      .then(function (result) {
+        if (!result.ok) {
+          el('outputPane').innerHTML = '<div class="error-box">' + escapeHtml(JSON.stringify(result.data, null, 2)) + '</div>';
+          return;
+        }
+        renderResult(result.data);
+      })
+      .catch(function (err) {
+        el('outputPane').innerHTML = '<div class="error-box">Request failed: ' + escapeHtml(String(err)) + '</div>';
+      })
+      .finally(function () {
+        btn.disabled = false;
+        btn.textContent = 'Generate real sequence';
+      });
+  });
+})();
+</script>
+</body>
+</html>
