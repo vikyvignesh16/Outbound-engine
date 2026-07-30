@@ -418,8 +418,16 @@ async def run_domain_quality_check(
 # ── FastAPI router ───────────────────────────────────────────────────────────
 
 @router.post("/pipelines/domain-quality")
-async def domain_quality_endpoint(background_tasks: BackgroundTasks, limit: int | None = None):
+async def domain_quality_endpoint(
+    background_tasks: BackgroundTasks,
+    limit: int | None = None,
+    target_ids: str | None = None,
+):
+    """Pass ?target_ids=id1,id2,... to scope the check to specific
+    qualified_tam_v2 rows (e.g. a just-pushed campaign batch) instead of the
+    global unchecked pool."""
+    ids = target_ids.split(",") if target_ids else None
     async def _run():
-        await run_domain_quality_check(limit=limit)
+        await run_domain_quality_check(limit=limit, target_ids=ids)
     background_tasks.add_task(_run)
-    return {"status": "accepted", "background": True, "limit": limit}
+    return {"status": "accepted", "background": True, "limit": limit, "target_ids_count": len(ids) if ids else None}
