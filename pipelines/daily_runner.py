@@ -7,7 +7,7 @@ from fastapi import APIRouter, BackgroundTasks
 from db.client import get_supabase, fetch_all
 from pipelines.qualification import run_crm_check, run_qualification_rules, run_technographic
 from pipelines.enrichment import submit_enrichment, run_prioritize
-from pipelines.content import submit_content
+from pipelines.content import submit_content, CONTENT_GENERATION_MARKETS
 from pipelines.monthly_batch import run_monthly_batch, push_batch_to_clay
 from utils.slack import notify
 
@@ -15,24 +15,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# Toggle to re-enable outbound content generation. Paused while we review the
-# emailless-contact / LinkedIn-only-outreach flow and decide what to do about
-# the bad-LinkedIn-URL companies (now archived in contact_gaps_failed).
-CONTENT_GENERATION_ENABLED = False
-
-
 async def _run_daily_bg() -> None:
     try:
         crm     = await run_crm_check()
         rules   = await run_qualification_rules()
         tech    = await run_technographic()
-        enrich     = await submit_enrichment()
-        if CONTENT_GENERATION_ENABLED:
-            content = await submit_content()
+
+        # If technographic was skipped (another call already holds the lock —
+        # e.g. a large manual backlog run in progress), do NOT proceed to
+        # enrichment/prioritize this cycle. Rows should only get scored and
+        # promoted once technographic has actually had a chance to complete for
+        # them, per an explicit decision to sequence it that way — the lock only
+        # ever protected the API calls from colliding, not this ordering.
+        if tech.get("status") == "skipped":
+            logger.info("daily_runner: technographic skipped (%s) — deferring enrichment/prioritize to next cycle", tech.get("reason"))
+            enrich = {"status": "deferred", "submitted": 0, "batches": 0, "batch_ids": []}
+            content = {"status": "deferred", "submitted": 0, "batches": 0, "batch_ids": []}
+            prioritize = {"status": "deferred", "prioritized": 0, "skipped_by_gate": 0}
         else:
-            content = {"status": "paused", "submitted": 0, "batches": 0, "batch_ids": []}
-            logger.info("daily_runner: content generation skipped (CONTENT_GENERATION_ENABLED=False)")
-        prioritize = await run_prioritize()
+            enrich = await submit_enrichment()
+            # Scoped inside submit_content() itself via CONTENT_GENERATION_MARKETS
+            # (currently DACH + US only) — other markets' pending contacts are
+            # left untouched (content_generated_at stays NULL) rather than
+            # gated behind a separate all-or-nothing flag here.
+            content = await submit_content()
+            prioritize = await run_prioritize()
 
         # Pipeline health snapshot
         sb = get_supabase()
@@ -66,31 +73,33 @@ async def _run_daily_bg() -> None:
 
         tech_line   = "0 pending (all covered ✅)" if tech["processed"] == 0   else f"+{tech['processed']:,} processed"
         enrich_line = "0 pending (all covered ✅)" if enrich["submitted"] == 0  else f"{enrich['submitted']:,} submitted ({enrich['batches']} batches)"
-        if not CONTENT_GENERATION_ENABLED:
-            content_line = "⏸️ paused (CONTENT_GENERATION_ENABLED=False)"
-        elif content["submitted"] == 0:
-            content_line = "0 contacts pending"
+        markets_line = "/".join(sorted(CONTENT_GENERATION_MARKETS))
+        if content["submitted"] == 0:
+            content_line = f"0 contacts pending ({markets_line} only)"
         else:
-            content_line = f"{content['submitted']:,} submitted ({content['batches']} batches)"
+            content_line = f"{content['submitted']:,} submitted ({content['batches']} batches, {markets_line} only)"
 
         monthly_line = ""
         if date.today().day == 1:
             batch_result = await run_monthly_batch()
-            if batch_result["selected"] > 0:
-                push_result = await push_batch_to_clay(batch_result["batch_number"])
-            else:
-                push_result = {"webhooks": {}}
-            webhook_summary = " | ".join(
-                f"{k.replace('CLAY_WEBHOOK_', '')}: {v.get('companies', 0)}"
-                for k, v in push_result.get("webhooks", {}).items()
-            ) or "none"
-            monthly_line = (
-                f"\n• Monthly batch #{batch_result['batch_number']}: "
-                f"{batch_result['selected']} companies — {webhook_summary}"
-            )
+            batch_numbers = batch_result.get("batch_numbers", {})
+            group_counts = batch_result.get("group_counts", {})
+
+            group_lines = []
+            for group, count in group_counts.items():
+                if count <= 0:
+                    continue
+                push_result = await push_batch_to_clay(group, batch_numbers[group])
+                summary = " | ".join(
+                    f"{k.replace('CLAY_WEBHOOK_', '')}: {v.get('companies', 0)}"
+                    for k, v in push_result.get("webhooks", {}).items()
+                ) or "none"
+                group_lines.append(f"{group} batch #{batch_numbers[group]}: {count} companies — {summary}")
+
+            monthly_line = ("\n• " + "\n• ".join(group_lines)) if group_lines else "\n• Monthly batch: 0 companies"
             logger.info(
-                "daily_runner: monthly batch #%d — %d selected",
-                batch_result["batch_number"], batch_result["selected"],
+                "daily_runner: monthly batch — %d selected across %s",
+                batch_result["selected"], batch_numbers,
             )
 
         await notify(

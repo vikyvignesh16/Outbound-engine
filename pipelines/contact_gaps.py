@@ -8,6 +8,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, BackgroundTasks
 
 from db.client import get_supabase, fetch_all
+from pipelines.monthly_batch import MARKET_GROUPS
 from utils.phantombuster import (
     launch_agent, get_container, is_finished, is_error, get_result_rows,
     output_shows_scrape_success,
@@ -96,42 +97,56 @@ def _is_subsidiary(linkedin_url: str, domain: str) -> bool:
 
 # ── Campaign batch count update ────────────────────────────────────────────────
 
-def _update_campaign_counts(domain: str, batch_number: int, count: int, source: str) -> None:
+def _update_campaign_counts(domain: str, market: str, batch_number: int, count: int, source: str) -> None:
+    # market is required alongside batch_number: since batch_number is scoped
+    # per market group (not global), the same domain can legitimately have
+    # two campaign_batches rows sharing a batch_number under different groups
+    # (e.g. an existing UKI row and a new FR row both at batch_number=1) —
+    # confirmed to happen for real domains in this dataset. Filtering by the
+    # gap row's own market disambiguates which row to update.
     get_supabase().table("campaign_batches").update({
         "contacts_sourced_count":  count,
         "contacts_sourced_source": source if count > 0 else "none",
-    }).eq("domain", domain).eq("batch_number", batch_number).execute()
+    }).eq("domain", domain).eq("market", market).eq("batch_number", batch_number).execute()
 
 
 # ── Gap detection ──────────────────────────────────────────────────────────────
 
-def detect_gaps(batch_number: int) -> int:
+def detect_gaps(market_group: str, batch_number: int) -> int:
     """Find domains in batch with no contacts yet (across both sourced_contacts
     and phantombuster_contacts) and insert pending rows in contact_gaps.
+
+    batch_number is scoped per market_group (DACH's batch 1 and US's batch 1
+    are different cohorts), so every query here is additionally filtered to
+    that group's markets — otherwise "batch_number=1" would pull rows from
+    every group at once.
 
     Idempotent: companies that already have a row in contact_gaps for this batch
     are left untouched, regardless of their current phantombuster_status.  This
     is important because the day-2 monthly cron may fire multiple times when
     re-deploys happen, and we never want to reset terminal rows back to pending
     (would cause PB to re-scrape and burn credits)."""
+    markets = list(MARKET_GROUPS[market_group])
+    group_filter = ("in_", "market", markets)
+
     batch_rows = fetch_all(
         "campaign_batches", "domain,company_name,market",
-        filters=[("eq", "batch_number", batch_number)],
+        filters=[("eq", "batch_number", batch_number), group_filter],
     )
     contacted = {
         r["domain"]
         for r in fetch_all("sourced_contacts", "domain",
-                           filters=[("eq", "batch_number", batch_number)])
+                           filters=[("eq", "batch_number", batch_number), group_filter])
     }
     pb_seen = {
         r["domain"]
         for r in fetch_all("phantombuster_contacts", "domain",
-                           filters=[("eq", "batch_number", batch_number)])
+                           filters=[("eq", "batch_number", batch_number), group_filter])
     }
     already_tracked = {
         r["domain"]
         for r in fetch_all("contact_gaps", "domain",
-                           filters=[("eq", "batch_number", batch_number)])
+                           filters=[("eq", "batch_number", batch_number), group_filter])
     }
     # Dedupe by domain — campaign_batches can legitimately have multiple rows
     # sharing a domain (e.g. Jurys Hotel Group + Leonardo Hotels both on
@@ -166,7 +181,7 @@ def detect_gaps(batch_number: int) -> int:
         } for g in gaps[i:i+100]]
         sb.table("contact_gaps").insert(chunk).execute()
 
-    logger.info("contact_gaps: detected %d new gaps for batch %d", len(gaps), batch_number)
+    logger.info("contact_gaps: detected %d new gaps for %s batch %d", len(gaps), market_group, batch_number)
     return len(gaps)
 
 
@@ -177,12 +192,15 @@ PHASE2_BATCH_SIZE  = 5       # Sales Nav URLs per Phase 2 launch (5x throughput)
 PUBLIC_API_BASE    = "https://brevooutboundengine-production.up.railway.app"
 
 
-def run_phase1(batch_number: int) -> int:
+def run_phase1(market_group: str, batch_number: int) -> int:
     """Launch LinkedIn Company Data Extractor for ONE pending gap, if no PB container
     is currently in flight AND today's launch count is below DAILY_PHASE1_LIMIT.
 
     PhantomBuster workspaces have a single parallel-execution slot AND a daily
-    cap of 150 LinkedIn Company Extractor runs.  We enforce both."""
+    cap of 150 LinkedIn Company Extractor runs.  We enforce both.
+
+    market_group scopes the pending-row lookup to that group's markets, since
+    batch_number alone no longer uniquely identifies a batch across groups."""
     in_flight = fetch_all(
         "contact_gaps", "id",
         filters=[("in_", "phantombuster_status", ["extracting_company", "scraping_contacts"])],
@@ -211,6 +229,7 @@ def run_phase1(batch_number: int) -> int:
         filters=[
             ("eq", "phantombuster_status", "pending"),
             ("eq", "batch_number", batch_number),
+            ("in_", "market", list(MARKET_GROUPS[market_group])),
         ],
         limit=1,
     )
@@ -242,7 +261,7 @@ def run_phase1(batch_number: int) -> int:
             sb.table("contact_gaps").update({
                 "phantombuster_status": "subsidiary_skipped",
             }).eq("id", row["id"]).execute()
-            _update_campaign_counts(row["domain"], batch_number, 0, "subsidiary")
+            _update_campaign_counts(row["domain"], row["market"], batch_number, 0, "subsidiary")
             logger.info("contact_gaps: subsidiary_skipped for %s", row["domain"])
             continue
 
@@ -485,7 +504,7 @@ def poll_phase2() -> int:
                         "contacts_found":       0,
                         "completed_at":         now_iso,
                     }).eq("id", gap["id"]).execute()
-                    _update_campaign_counts(gap["domain"], gap["batch_number"], 0, "none")
+                    _update_campaign_counts(gap["domain"], gap["market"], gap["batch_number"], 0, "none")
                     logger.info("contact_gaps: no contacts found for %s", gap["domain"])
                     continue
 
@@ -498,7 +517,7 @@ def poll_phase2() -> int:
                     "contacts_found":       len(contacts),
                     "completed_at":         now_iso,
                 }).eq("id", gap["id"]).execute()
-                _update_campaign_counts(gap["domain"], gap["batch_number"], len(contacts), "linkedin")
+                _update_campaign_counts(gap["domain"], gap["market"], gap["batch_number"], len(contacts), "linkedin")
                 completed += 1
                 logger.info("contact_gaps: completed for %s → %d contacts", gap["domain"], len(contacts))
         except Exception as exc:
@@ -533,24 +552,24 @@ def _map_contact(pb_row: dict, gap_row: dict) -> dict:
 
 # ── FastAPI endpoints ──────────────────────────────────────────────────────────
 
-async def _run_contact_gaps_bg(batch_number: int) -> None:
+async def _run_contact_gaps_bg(market_group: str, batch_number: int) -> None:
     try:
-        gaps     = detect_gaps(batch_number)
-        launched = run_phase1(batch_number)
+        gaps     = detect_gaps(market_group, batch_number)
+        launched = run_phase1(market_group, batch_number)
         await notify(
-            f"🔍 *Contact gaps — batch #{batch_number}*\n"
+            f"🔍 *Contact gaps — {market_group} batch #{batch_number}*\n"
             f"• Gaps detected: {gaps}\n"
             f"• Phase 1 jobs launched: {launched}",
         )
     except Exception as exc:
-        await notify(f"❌ *Contact gaps failed (batch #{batch_number})* — `{exc}`", success=False)
+        await notify(f"❌ *Contact gaps failed ({market_group} batch #{batch_number})* — `{exc}`", success=False)
         logger.exception("contact_gaps: background task failed")
 
 
 @router.post("/pipelines/contact-gaps")
-async def run_contact_gaps(batch_number: int, background_tasks: BackgroundTasks):
-    background_tasks.add_task(_run_contact_gaps_bg, batch_number)
-    return {"status": "started", "batch_number": batch_number}
+async def run_contact_gaps(market_group: str, batch_number: int, background_tasks: BackgroundTasks):
+    background_tasks.add_task(_run_contact_gaps_bg, market_group, batch_number)
+    return {"status": "started", "market_group": market_group, "batch_number": batch_number}
 
 
 @router.get("/pipelines/contact-gaps/sales-nav-csv")
@@ -580,68 +599,98 @@ async def sales_nav_csv(ids: str):
     return Response("\n".join(lines) + "\n", media_type="text/csv")
 
 
+def _latest_batch_number(market_group: str) -> int | None:
+    """Highest batch_number within one market group's own markets — batch_number
+    resets per group, so "latest" has to be computed per group, not table-wide."""
+    rows = fetch_all(
+        "campaign_batches", "batch_number",
+        filters=[("in_", "market", list(MARKET_GROUPS[market_group]))],
+        order_by=[("batch_number", True)], limit=1,
+    )
+    return rows[0]["batch_number"] if rows else None
+
+
 @router.post("/pipelines/contact-gaps/run-latest")
 async def run_contact_gaps_latest(background_tasks: BackgroundTasks):
-    """Cron-friendly: trigger contact-gaps for the most recent batch_number in
-    campaign_batches.  Used by the day-2 monthly cron."""
-    rows = fetch_all("campaign_batches", "batch_number",
-                     order_by=[("batch_number", True)], limit=1)
-    if not rows:
+    """Cron-friendly: trigger contact-gaps for the most recent batch in EVERY
+    market group. Used by the day-2 monthly cron.
+
+    Previously this looked up a single table-wide "latest batch_number" — with
+    batch_number now scoped per group, that would only ever cover whichever
+    group happened to have the numerically highest number and silently skip
+    the other three every time. Looping every group here is what actually
+    fixes the batch-4/5-never-gap-detected gap found in this session."""
+    started = {}
+    for group in MARKET_GROUPS:
+        batch_number = _latest_batch_number(group)
+        if batch_number is None:
+            continue
+        background_tasks.add_task(_run_contact_gaps_bg, group, batch_number)
+        started[group] = batch_number
+    if not started:
         return {"status": "no_batches"}
-    batch_number = rows[0]["batch_number"]
-    background_tasks.add_task(_run_contact_gaps_bg, batch_number)
-    return {"status": "started", "batch_number": batch_number}
+    return {"status": "started", "batches": started}
 
 
 async def _post_digest_bg() -> None:
-    """Daily digest: post one Slack message summarising progress on the latest batch."""
+    """Daily digest: post one Slack message summarising progress on every
+    market group's latest batch (batch_number resets per group, so "the
+    latest batch" is 4 separate numbers now, not one table-wide max)."""
     from datetime import datetime, timedelta, timezone
     from collections import Counter
 
-    batches = fetch_all("campaign_batches", "batch_number",
-                        order_by=[("batch_number", True)], limit=1)
-    if not batches:
-        return
-    bn = batches[0]["batch_number"]
-
-    gaps = fetch_all("contact_gaps", "phantombuster_status,completed_at",
-                     filters=[("eq", "batch_number", bn)])
-    status_counts = Counter(g["phantombuster_status"] for g in gaps)
-    total = len(gaps)
-    terminal = sum(status_counts.get(s, 0) for s in
-                   ("completed", "no_contacts_found", "failed", "subsidiary_skipped"))
-    in_flight = sum(status_counts.get(s, 0) for s in
-                    ("extracting_company", "scraping_contacts"))
-    pending = status_counts.get("pending", 0)
-
-    # Last 24h throughput
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    completed_last_24h = sum(
-        1 for g in gaps
-        if g.get("completed_at") and
-        datetime.fromisoformat(g["completed_at"].replace("Z", "+00:00")) > cutoff
-    )
+    sections = []
 
-    pbc_rows = fetch_all("phantombuster_contacts",
-                         "relevance_score,scored_at,promoted_to_sourced_contacts",
-                         filters=[("eq", "batch_number", bn)])
-    scraped_total = len(pbc_rows)
-    scored        = sum(1 for r in pbc_rows if r.get("scored_at"))
-    promoted      = sum(1 for r in pbc_rows if r.get("promoted_to_sourced_contacts"))
-    relevant_pct  = round(promoted / scored * 100) if scored else 0
+    for group in MARKET_GROUPS:
+        bn = _latest_batch_number(group)
+        if bn is None:
+            continue
+        markets = list(MARKET_GROUPS[group])
 
-    pct = round(terminal / total * 100) if total else 0
-    eta_days = round(pending / completed_last_24h) if completed_last_24h else None
-    eta_str  = f"~{eta_days} days" if eta_days else "n/a (no recent throughput)"
+        gaps = fetch_all("contact_gaps", "phantombuster_status,completed_at",
+                         filters=[("eq", "batch_number", bn), ("in_", "market", markets)])
+        status_counts = Counter(g["phantombuster_status"] for g in gaps)
+        total = len(gaps)
+        terminal = sum(status_counts.get(s, 0) for s in
+                       ("completed", "no_contacts_found", "failed", "subsidiary_skipped"))
+        in_flight = sum(status_counts.get(s, 0) for s in
+                        ("extracting_company", "scraping_contacts"))
+        pending = status_counts.get("pending", 0)
 
-    msg = (
-        f"📊 *Contact-gap progress — batch #{bn}*\n"
-        f"• Companies: *{terminal}/{total}* done ({pct}%) — {in_flight} in flight, {pending} pending\n"
-        f"• Throughput (24h): {completed_last_24h} companies — ETA: {eta_str}\n"
-        f"• PB contacts scraped: {scraped_total} — scored: {scored} — promoted: {promoted} ({relevant_pct}% relevant)\n"
-        f"• Failed/skipped: {status_counts.get('failed', 0) + status_counts.get('subsidiary_skipped', 0)}"
-    )
-    await notify(msg)
+        completed_last_24h = sum(
+            1 for g in gaps
+            if g.get("completed_at") and
+            datetime.fromisoformat(g["completed_at"].replace("Z", "+00:00")) > cutoff
+        )
+
+        pbc_rows = fetch_all("phantombuster_contacts",
+                             "relevance_score,scored_at,promoted_to_sourced_contacts",
+                             filters=[("eq", "batch_number", bn), ("in_", "market", markets)])
+        scraped_total = len(pbc_rows)
+        scored        = sum(1 for r in pbc_rows if r.get("scored_at"))
+        promoted      = sum(1 for r in pbc_rows if r.get("promoted_to_sourced_contacts"))
+        relevant_pct  = round(promoted / scored * 100) if scored else 0
+
+        pct = round(terminal / total * 100) if total else 0
+        eta_days = round(pending / completed_last_24h) if completed_last_24h else None
+        eta_str  = f"~{eta_days} days" if eta_days else "n/a (no recent throughput)"
+
+        if total == 0:
+            continue
+
+        sections.append(
+            f"*{group} batch #{bn}*\n"
+            f"• Companies: *{terminal}/{total}* done ({pct}%) — {in_flight} in flight, {pending} pending\n"
+            f"• Throughput (24h): {completed_last_24h} companies — ETA: {eta_str}\n"
+            f"• PB contacts scraped: {scraped_total} — scored: {scored} — promoted: {promoted} ({relevant_pct}% relevant)\n"
+            f"• Failed/skipped: {status_counts.get('failed', 0) + status_counts.get('subsidiary_skipped', 0)}"
+        )
+
+    if not sections:
+        return
+
+    await notify("📊 *Contact-gap progress*\n\n" + "\n\n".join(sections))
 
 
 @router.post("/pipelines/contact-gaps/digest")
@@ -718,21 +767,33 @@ def run_phase1_for_latest_batch() -> int:
 
     Historically this always targeted the latest batch, but that starved
     off-cycle batches (e.g. the 2026-06-26 UK gifting batch #2 sat with 50
-    pending rows while the monthly batch #3 got all the launches). Now
-    prefers the OLDEST batch that still has pending rows, so smaller
-    off-cycle batches finish quickly before the big monthly one takes over.
+    pending rows while the monthly batch #3 got all the launches). It then
+    preferred the OLDEST batch_number with pending rows — but batch_number
+    now resets per market group, so raw batch_number is no longer comparable
+    across groups (a brand-new group's batch #1 isn't "older" than another
+    group's batch #9). Instead: check every group in turn for its own oldest
+    pending batch, and let run_phase1's existing single-in-flight-container
+    guard naturally cap this to at most one real launch per poll cycle
+    (whichever group is checked first that actually has a launchable row) —
+    same effective fairness as before, just scoped correctly per group.
 
-    Returns count launched (0 or 1) — run_phase1 has a global single-slot
-    guard so at most one launch per invocation, regardless of batch."""
-    pending = fetch_all(
-        "contact_gaps", "batch_number",
-        filters=[("eq", "phantombuster_status", "pending")],
-        order_by=[("batch_number", False)],  # ASC — oldest batch first
-        limit=1,
-    )
-    if not pending:
-        return 0
-    return run_phase1(pending[0]["batch_number"])
+    Returns count launched (0 or 1)."""
+    for group in MARKET_GROUPS:
+        pending = fetch_all(
+            "contact_gaps", "batch_number",
+            filters=[
+                ("eq", "phantombuster_status", "pending"),
+                ("in_", "market", list(MARKET_GROUPS[group])),
+            ],
+            order_by=[("batch_number", False)],  # ASC — oldest batch first, within this group
+            limit=1,
+        )
+        if not pending:
+            continue
+        launched = run_phase1(group, pending[0]["batch_number"])
+        if launched:
+            return launched
+    return 0
 
 
 # ── Diagnostic: end-to-end trace of a single URL through Phase 1 ───────────────

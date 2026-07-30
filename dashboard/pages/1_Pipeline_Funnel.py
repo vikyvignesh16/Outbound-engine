@@ -82,9 +82,12 @@ covered AS (
   GROUP BY batch_number, market
 ),
 content_done AS (
-  SELECT batch_number, COUNT(*) AS contacts_with_content
+  -- batch_number is scoped per market group (not global), so grouping by
+  -- batch_number alone here would sum e.g. UKI batch #1 together with DACH
+  -- batch #1 and US batch #1 — market has to be part of the join key too.
+  SELECT batch_number, market, COUNT(*) AS contacts_with_content
   FROM sourced_contacts WHERE content_generated_at IS NOT NULL
-  GROUP BY batch_number
+  GROUP BY batch_number, market
 )
 SELECT cb.batch_number,
        cb.market,
@@ -94,7 +97,7 @@ SELECT cb.batch_number,
        COALESCE(cd.contacts_with_content, 0) AS contacts_with_content
 FROM cb
 LEFT JOIN covered c ON cb.batch_number = c.batch_number AND cb.market = c.market
-LEFT JOIN content_done cd ON cb.batch_number = cd.batch_number
+LEFT JOIN content_done cd ON cb.batch_number = cd.batch_number AND cb.market = cd.market
 ORDER BY cb.batch_number DESC, cb.market
 """)
 st.dataframe(batches, hide_index=True, use_container_width=True)
@@ -106,12 +109,13 @@ st.subheader("Contact source split (Clay vs PhantomBuster)")
 sources = query_df("""
 SELECT COALESCE(source, '(unknown)') AS source,
        batch_number,
+       market,
        COUNT(*) AS contacts,
        COUNT(*) FILTER (WHERE email IS NOT NULL AND email <> '') AS with_email,
        COUNT(*) FILTER (WHERE email IS NULL OR email = '')       AS no_email
 FROM sourced_contacts
 WHERE batch_number IS NOT NULL
-GROUP BY source, batch_number
-ORDER BY batch_number DESC, source
+GROUP BY source, batch_number, market
+ORDER BY batch_number DESC, market, source
 """)
 st.dataframe(sources, hide_index=True, use_container_width=True)

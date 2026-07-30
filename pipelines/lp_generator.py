@@ -6,14 +6,29 @@ landing page for the Email 1 LP teaser anchor. The API is slow (35-45s per
 call) and idempotent per company, so we cache one row per domain forever
 in company_lp_cache. Subsequent contacts at the same company reuse the URL.
 
-Markets are mapped from our internal codes (UK / Ireland / DE / AT / CH / US / FR)
-to the API's enum (UKI / DACH / USA / FR).
+2026-07-28: payload expanded to the "create_abm1" schema — the API now
+takes archetype (required, drives the whole page) and market (routes the
+final CTA) as structured routing fields, plus a set of enrichment signals
+(icp_archetype_evidence, account_fit_reasoning, esp_detected/score,
+has_loyalty_program, has_wallet, needs_cdp, email_crm_activity) that the
+LP-side writer uses as context — these are never printed verbatim on the
+page, they just shape what it writes. `title` is the page/browser-tab
+title (company-level, e.g. "Nautica x Brevo"), not the contact's job
+title — the page stays one-per-domain, reused across every contact at
+that company, same as before.
+
+Markets are mapped from our internal codes (UK / Ireland / DE / AT / CH / US
+/ FR) to the API's lowercase enum (uki / dach / us / fr). Archetypes are
+mapped from our Title Case names (Graduate, Network, ...) to the API's
+snake_case enum (graduate, network, ...) — a missing/unclassified archetype
+is sent as the literal string "none" rather than skipping the call or
+guessing a default, per an explicit decision to always attempt an LP.
 
 Flow per domain:
   1. Look up company_lp_cache.
   2. Hit → return cached preview_url.
-  3. Miss → POST to /generate with company + domain + industry + market (+ esp).
-     Cache the result (success or already_existed). Return the URL.
+  3. Miss → POST to /generate with the full create_abm1 payload. Cache the
+     result (success or already_existed). Return the URL.
   4. On HTTP/validation/network error → log, return None, do NOT cache so
      the next batch retries.
 """
@@ -41,24 +56,50 @@ _MAX_INFLIGHT = 15
 # complex companies) whose generation reliably runs past 120s and then 502s.
 _TIMEOUT_S = 180.0
 
-# Map our market codes to the API's enum.
-_MARKET_MAP: dict[str, str] = {
-    "UK":      "UKI",
-    "Ireland": "UKI",
-    "IE":      "UKI",
-    "DE":      "DACH",
-    "AT":      "DACH",
-    "CH":      "DACH",
-    "US":      "USA",
-    "FR":      "FR",
-    "France":  "FR",
+# Map our market codes to the API's market enum (routes the final CTA
+# round-robin) and to the page's written language.
+#
+# Confirmed live 2026-07-28 (direct probe against the API): it only accepts
+# market as UPPERCASE 'UKI' | 'DACH' | 'USA' | 'FR' — the lowercase
+# dach/uki/us/fr enum we were originally told about 422s. FR was added to
+# the live schema and end-to-end verified the same day (real preview_url
+# returned for a test FR company) after the Railway service running this
+# API was redeployed with the FR-enabled source.
+_MARKET_SLUG: dict[str, str] = {
+    "UK": "UKI", "Ireland": "UKI", "IE": "UKI",
+    "DE": "DACH", "AT": "DACH", "CH": "DACH",
+    "US": "USA",
+    "FR": "FR", "France": "FR",
+}
+# Slug -> lang directly, since _mint() only has the already-normalised slug
+# on hand by the time it needs to pick a language.
+_SLUG_LANG: dict[str, str] = {"UKI": "en", "DACH": "de", "USA": "en", "FR": "fr"}
+
+# Map our Title Case archetype names (as stored on priority_tam /
+# icp_archetype_primary) to the API's required snake_case enum.
+_ARCHETYPE_SLUG: dict[str, str] = {
+    "Graduate":           "graduate",
+    "Network":            "network",
+    "Consolidator":       "consolidator",
+    "Email Specialist":   "email_specialist",
+    "Feature Specialist": "feature_specialist",
+    "Saver":              "saver",
 }
 
 
 def _normalise_market(market: str | None) -> str | None:
     if not market:
         return None
-    return _MARKET_MAP.get(market.strip())
+    return _MARKET_SLUG.get(market.strip())
+
+
+def _archetype_slug(archetype: str | None) -> str:
+    """"None"/empty/unrecognised all become the literal string "none" — sent
+    as-is rather than skipping the LP call or guessing a fallback archetype,
+    per explicit decision (2026-07-28)."""
+    if not archetype:
+        return "none"
+    return _ARCHETYPE_SLUG.get(archetype.strip(), "none")
 
 
 def _normalise_esp(esp: str | None) -> str | None:
@@ -102,18 +143,67 @@ async def _mint(
     industry: str,
     market: str,
     esp: str | None,
+    archetype: str,
+    icp_archetype_secondary: str | None = None,
+    icp_archetype_evidence: str | None = None,
+    account_fit_reasoning: str | None = None,
+    account_fit_score: int | None = None,
+    esp_score: int | None = None,
+    has_loyalty_program: bool | None = None,
+    has_wallet: bool | None = None,
+    needs_cdp: bool | None = None,
+    email_crm_activity: str | None = None,
+    logo_url: str | None = None,
 ) -> dict | None:
     """Single POST to the LP generator. Returns the parsed response dict on
     success, None on error (so caller can decide whether to skip the contact
-    or fall back)."""
+    or fall back).
+
+    `market`/`archetype` here are already the API's slugs (lowercase /
+    snake_case) — callers pass the normalised values, this function just
+    assembles and sends the body.
+    """
     body = {
-        "company":  company_name,
-        "domain":   domain,
-        "industry": industry,
-        "market":   market,
+        "company":        company_name,
+        "title":          f"{company_name} x Brevo",
+        # The live API 422s with "domain: Field required" if this bare key is
+        # missing — confirmed 2026-07-28 (every fresh mint failed until this
+        # was added). Sent alongside company_domain since the schema we were
+        # given explicitly names that one too (logo.dev + contact-card email).
+        "domain":         domain,
+        "company_domain": domain,
+        "lang":           _SLUG_LANG.get(market, "en"),
+        "industry":       industry,
+        "vertical":       industry,
+        "archetype":      archetype,
+        "market":         market,
     }
+    if logo_url:
+        body["logo_url"] = logo_url
+
+    # Enrichment signals — context for the LP-side writer, never printed
+    # verbatim on the page. Omitted when we simply don't have the value
+    # rather than sending null/empty-string noise.
+    if icp_archetype_secondary:
+        body["icp_archetype_secondary"] = icp_archetype_secondary
+    if icp_archetype_evidence:
+        body["icp_archetype_evidence"] = icp_archetype_evidence
+    if account_fit_reasoning:
+        body["account_fit_reasoning"] = account_fit_reasoning
+    if account_fit_score is not None:
+        body["account_fit_score"] = account_fit_score
     if esp:
-        body["esp"] = esp
+        body["esp_detected"] = esp
+    if esp_score is not None:
+        body["esp_score"] = esp_score
+    if has_loyalty_program is not None:
+        body["has_loyalty_program"] = has_loyalty_program
+    if has_wallet is not None:
+        body["has_wallet"] = has_wallet
+    if needs_cdp is not None:
+        body["needs_cdp"] = needs_cdp
+    if email_crm_activity:
+        body["email_crm_activity"] = email_crm_activity
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
@@ -149,6 +239,17 @@ async def fetch_company_lp(
     industry: str | None,
     market: str | None,
     esp: str | None = None,
+    icp_archetype_primary: str | None = None,
+    icp_archetype_secondary: str | None = None,
+    icp_archetype_evidence: str | None = None,
+    account_fit_reasoning: str | None = None,
+    account_fit_score: int | None = None,
+    esp_score: int | None = None,
+    has_loyalty_program: bool | None = None,
+    has_wallet: bool | None = None,
+    needs_cdp: bool | None = None,
+    email_crm_activity: str | None = None,
+    logo_url: str | None = None,
 ) -> str | None:
     """Cache-first lookup. Returns the preview_url or None on missing inputs
     or unrecoverable error. None means "we couldn't get a URL for this
@@ -183,6 +284,17 @@ async def fetch_company_lp(
         industry=industry,
         market=api_market,
         esp=_normalise_esp(esp),
+        archetype=_archetype_slug(icp_archetype_primary),
+        icp_archetype_secondary=icp_archetype_secondary,
+        icp_archetype_evidence=icp_archetype_evidence,
+        account_fit_reasoning=account_fit_reasoning,
+        account_fit_score=account_fit_score,
+        esp_score=esp_score,
+        has_loyalty_program=has_loyalty_program,
+        has_wallet=has_wallet,
+        needs_cdp=needs_cdp,
+        email_crm_activity=email_crm_activity,
+        logo_url=logo_url,
     )
     if not payload:
         return None
@@ -198,7 +310,10 @@ async def fetch_company_lp(
 async def fetch_many(companies: list[dict]) -> dict[str, str]:
     """Fan out fetch_company_lp across many companies with bounded concurrency.
 
-    Input items: {domain, company_name, industry, market, esp}.
+    Input items: {domain, company_name, industry, market, esp_detected,
+    esp_score, icp_archetype_primary, icp_archetype_secondary,
+    icp_archetype_evidence, account_fit_reasoning, account_fit_score,
+    has_loyalty_program, has_wallet, needs_cdp, email_crm_activity}.
     Returns {domain -> preview_url}. Missing/failed lookups are silently
     omitted from the result so callers can `.get(domain, "")` safely.
     """
@@ -208,11 +323,22 @@ async def fetch_many(companies: list[dict]) -> dict[str, str]:
     async def _one(item: dict) -> None:
         async with sem:
             url = await fetch_company_lp(
-                domain       = item.get("domain") or "",
-                company_name = item.get("company_name") or "",
-                industry     = item.get("industry"),
-                market       = item.get("market"),
-                esp          = item.get("esp"),
+                domain                  = item.get("domain") or "",
+                company_name            = item.get("company_name") or "",
+                industry                = item.get("industry"),
+                market                  = item.get("market"),
+                esp                     = item.get("esp_detected"),
+                icp_archetype_primary   = item.get("icp_archetype_primary"),
+                icp_archetype_secondary = item.get("icp_archetype_secondary"),
+                icp_archetype_evidence  = item.get("icp_archetype_evidence"),
+                account_fit_reasoning   = item.get("account_fit_reasoning"),
+                account_fit_score       = item.get("account_fit_score"),
+                esp_score               = item.get("esp_score"),
+                has_loyalty_program     = item.get("has_loyalty_program"),
+                has_wallet              = item.get("has_wallet"),
+                needs_cdp               = item.get("needs_cdp"),
+                email_crm_activity      = item.get("email_crm_activity"),
+                logo_url                = item.get("logo_url"),
             )
             if url:
                 out[(item.get("domain") or "").strip().lower()] = url
